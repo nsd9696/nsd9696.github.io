@@ -38,7 +38,7 @@ Since `batched_mm` is compatible with `torch.compile`, it supports `fullgraph`. 
 
 Since weights are not duplicated, this approach is the most memory-efficient, and it particularly excels with long sequences and large batches.
 
-{% include figure.liquid loading="eager" path="assets/img/experts_impl_blog_1.png" class="img-fluid rounded z-depth-1" zoomable=true caption="Batched Matrix Multiplication (bmm) vs Grouped GEMM Approach" %}
+{% include figure.liquid loading="eager" path="assets/img/experts_impl_blog_1.png" class="img-fluid rounded z-depth-1 d-block mx-auto" width="80%" zoomable=true caption="Batched Matrix Multiplication (bmm) vs Grouped GEMM Approach" %}
 
 ---
 
@@ -46,7 +46,7 @@ Since weights are not duplicated, this approach is the most memory-efficient, an
 
 Since the PR showed significant performance differences, I ran benchmarks directly using Upstage's Solar-Open model. Looking at just the Mean Latency, the differences were meaningful. `batched_mm` performed reasonably well with short, small inputs, but overall `grouped_mm` showed the best performance. Compared to eager, even without compile it was about 4x faster on average, and with compile applied the latency difference reached up to 10x.
 
-{% include figure.liquid loading="eager" path="assets/img/solar_latency_summary.png" class="img-fluid rounded z-depth-1" zoomable=true caption="Solar-Open 100B Latency Comparison (Experts Backend & Torch Compile)" %}
+{% include figure.liquid loading="eager" path="assets/img/solar_latency_summary.png" class="img-fluid rounded z-depth-1 d-block mx-auto" width="80%" zoomable=true caption="Solar-Open 100B Latency Comparison (Experts Backend & Torch Compile)" %}
 
 ```python
 model = AutoModelForCausalLM.from_pretrained(

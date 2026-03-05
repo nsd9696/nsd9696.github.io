@@ -109,7 +109,7 @@ By giving up ordering, packets can be sprayed across multiple paths. If one path
 
 When using EFA, the GPUDirect RDMA flow looks like this:
 
-{% include figure.liquid loading="eager" path="assets/img/efa_blog_1.png" class="img-fluid rounded z-depth-1" zoomable=true caption="EFA GPUDirect RDMA Flow" %}
+{% include figure.liquid loading="eager" path="assets/img/efa_blog_1.png" class="img-fluid rounded z-depth-1 d-block mx-auto" width="80%" zoomable=true caption="EFA GPUDirect RDMA Flow" %}
 
 Of course, intra-node GPU communication still uses NVLink.
 
@@ -137,7 +137,7 @@ In my case, I was working on setting up Prefill/Decode Disagg in an A100 environ
 
 ### KV Cache Transfer Software Stack
 
-{% include figure.liquid loading="eager" path="assets/img/efa_blog_2.png" class="img-fluid rounded z-depth-1" zoomable=true caption="KV Cache Transfer Software Stack on EFA" %}
+{% include figure.liquid loading="eager" path="assets/img/efa_blog_2.png" class="img-fluid rounded z-depth-1 d-block mx-auto" width="80%" zoomable=true caption="KV Cache Transfer Software Stack on EFA" %}
 
 Let's look at each component above EFA in detail.
 

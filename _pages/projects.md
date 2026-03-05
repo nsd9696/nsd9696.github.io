@@ -6,7 +6,6 @@ description: A growing collection of your cool projects.
 nav: false
 nav_order: 3
 lang: en
-lang_alt: /ko/projects/
 display_categories: [work, fun]
 horizontal: false
 ---

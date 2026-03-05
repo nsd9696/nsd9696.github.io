@@ -151,22 +151,6 @@
               </button>
             </li>
           {% endif %}
-          <!-- Language switcher -->
-          <li class="toggle-container">
-            {% if current_lang == 'ko' %}
-              {% assign switch_url = page.lang_alt | default: null %}
-              {% unless switch_url %}
-                {% assign switch_url = site.data.lang_urls[page.permalink].en | default: '/' %}
-              {% endunless %}
-              <a class="nav-link" href="{{ switch_url | relative_url }}" title="English">EN</a>
-            {% else %}
-              {% assign switch_url = page.lang_alt | default: null %}
-              {% unless switch_url %}
-                {% assign switch_url = site.data.lang_urls[page.permalink].ko | default: '/ko/' %}
-              {% endunless %}
-              <a class="nav-link" href="{{ switch_url | relative_url }}" title="한국어">KO</a>
-            {% endif %}
-          </li>
         </ul>
       </div>
     </div>

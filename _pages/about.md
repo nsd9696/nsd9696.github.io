@@ -3,7 +3,6 @@ layout: about
 title: about
 permalink: /
 lang: en
-lang_alt: /ko/
 subtitle: AI Research Engineer @ <a href='https://vessl.ai/'>VESSL AI</a> | UC Berkeley | ex-Intel
 
 profile:

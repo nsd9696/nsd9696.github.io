@@ -1,0 +1,12 @@
+# BGM Track List
+# To add a new track:
+#   1. Go to Spotify > right-click a song > Share > Copy Song Link
+#   2. The link looks like: https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT
+#   3. Copy the track ID (the part after /track/) and add it below
+#
+# Each track embed shows the song's album cover, title, and artist.
+
+tracks:
+  - id: "4cOdK2wGLETKBW3PvgPWqT" # Rick Astley - Never Gonna Give You Up
+  - id: "7qiZfU4dY1lWllzX7mPBI3" # Ed Sheeran - Shape of You
+  - id: "3n3Ppam7vgaVa1iaRUc9Lp" # Mr. Brightside - The Killers

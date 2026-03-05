@@ -1,0 +1,273 @@
+<!-- Cyworld Mini-Hompy BGM Player Widget -->
+<style>
+/* ── BGM Floating Widget ── */
+.bgm-widget {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 9999;
+  width: 300px;
+  border: 2px solid #90c4e8;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #f6faff;
+  box-shadow: 0 4px 24px rgba(100, 160, 220, 0.2);
+  font-family: "Courier New", "Noto Sans KR", monospace;
+  transition: all 0.3s ease;
+}
+html[data-theme="dark"] .bgm-widget {
+  background: #171d24;
+  border-color: #3a5a78;
+  box-shadow: 0 4px 24px rgba(30, 60, 100, 0.5);
+}
+
+/* Minimized state */
+.bgm-widget.minimized {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  cursor: pointer;
+  overflow: hidden;
+  border-width: 2px;
+}
+.bgm-widget.minimized .bgm-w-body,
+.bgm-widget.minimized .bgm-w-titletext,
+.bgm-widget.minimized .bgm-w-dots,
+.bgm-widget.minimized .bgm-w-counter,
+.bgm-widget.minimized .bgm-w-marquee,
+.bgm-widget.minimized .bgm-w-mood {
+  display: none;
+}
+.bgm-widget.minimized .bgm-w-titlebar {
+  border-radius: 50%;
+  justify-content: center;
+  padding: 0;
+  width: 44px;
+  height: 44px;
+}
+.bgm-widget.minimized .bgm-w-toggle {
+  font-size: 18px;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Title Bar */
+.bgm-w-titlebar {
+  background: linear-gradient(135deg, #7bb8e0 0%, #a8d8f0 100%);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+html[data-theme="dark"] .bgm-w-titlebar {
+  background: linear-gradient(135deg, #2a5080 0%, #3a6890 100%);
+}
+.bgm-w-dots {
+  display: flex;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.bgm-w-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+.bgm-w-dot:nth-child(1) { background: #ff6b6b; }
+.bgm-w-dot:nth-child(2) { background: #ffd93d; }
+.bgm-w-dot:nth-child(3) { background: #6bcb77; }
+.bgm-w-titletext {
+  font-size: 12px;
+  font-weight: bold;
+  color: #fff;
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.15);
+  letter-spacing: 2px;
+  white-space: nowrap;
+}
+.bgm-w-toggle {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  color: #fff;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: bold;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.2s;
+  font-family: "Courier New", monospace;
+}
+.bgm-w-toggle:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Counter */
+.bgm-w-counter {
+  text-align: center;
+  padding: 5px 10px;
+  font-size: 10px;
+  color: #8cb8d8;
+  border-bottom: 1px dotted #d0e4f0;
+  letter-spacing: 1px;
+}
+html[data-theme="dark"] .bgm-w-counter {
+  color: #5a7a94;
+  border-bottom-color: #2a3a4a;
+}
+
+/* Marquee */
+.bgm-w-marquee {
+  overflow: hidden;
+  white-space: nowrap;
+  padding: 4px 0;
+  font-size: 10px;
+  color: #88b4d4;
+}
+html[data-theme="dark"] .bgm-w-marquee {
+  color: #4a6a84;
+}
+.bgm-w-marquee span {
+  display: inline-block;
+  animation: bgm-scroll 18s linear infinite;
+}
+@keyframes bgm-scroll {
+  0% { transform: translateX(100%); }
+  100% { transform: translateX(-100%); }
+}
+
+/* Body */
+.bgm-w-body {
+  padding: 10px;
+  max-height: 380px;
+  overflow-y: auto;
+}
+.bgm-w-body::-webkit-scrollbar {
+  width: 4px;
+}
+.bgm-w-body::-webkit-scrollbar-thumb {
+  background: #b0d4ec;
+  border-radius: 2px;
+}
+html[data-theme="dark"] .bgm-w-body::-webkit-scrollbar-thumb {
+  background: #3a5468;
+}
+
+.bgm-w-section-title {
+  font-size: 10px;
+  color: #6aa8d0;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin: 10px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed #d0e4f0;
+}
+html[data-theme="dark"] .bgm-w-section-title {
+  color: #5a8aaa;
+  border-bottom-color: #2a3a4a;
+}
+.bgm-w-section-title:first-child {
+  margin-top: 0;
+}
+
+.bgm-w-track {
+  margin-bottom: 6px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* Mood */
+.bgm-w-mood {
+  text-align: center;
+  padding: 8px 10px;
+  font-size: 10px;
+  color: #8cbcd8;
+  border-top: 1px dotted #d0e4f0;
+  letter-spacing: 1px;
+}
+html[data-theme="dark"] .bgm-w-mood {
+  color: #4a6a80;
+  border-top-color: #2a3a4a;
+}
+
+/* Mobile */
+@media (max-width: 768px) {
+  .bgm-widget {
+    width: 280px;
+    left: 10px;
+    bottom: 10px;
+  }
+  .bgm-widget.minimized {
+    width: 44px;
+    height: 44px;
+  }
+  .bgm-w-body {
+    max-height: 260px;
+  }
+}
+</style>
+
+<div class="bgm-widget minimized" id="bgm-widget">
+  <!-- Title Bar -->
+  <div class="bgm-w-titlebar">
+    <div class="bgm-w-dots">
+      <div class="bgm-w-dot"></div>
+      <div class="bgm-w-dot"></div>
+      <div class="bgm-w-dot"></div>
+    </div>
+    <div class="bgm-w-titletext">&#9835; BGM &#9835;</div>
+    <button class="bgm-w-toggle" id="bgm-toggle" aria-label="Toggle BGM player" onclick="toggleBgm(event)">+</button>
+  </div>
+
+  <!-- Counter -->
+  <div class="bgm-w-counter">
+    TODAY <strong>128</strong> &middot; TOTAL <strong>54,321</strong>
+  </div>
+
+  <!-- Marquee -->
+  <div class="bgm-w-marquee">
+    <span>&#9834; welcome to my mini hompy &#9834; enjoy the bgm &#9834; have a nice day &#9834;&nbsp;&nbsp;&nbsp;&nbsp;</span>
+  </div>
+
+  <!-- Body: individual track embeds from _data/bgm_tracks.yml -->
+  <div class="bgm-w-body">
+    <div class="bgm-w-section-title">&#9834; my playlist</div>
+    <div class="bgm-w-track">
+      <iframe style="border-radius:8px" src="https://open.spotify.com/embed/playlist/1OTW2C1bHbng9nbLUdPPzF?utm_source=generator&theme=0" width="100%" height="352" frameBorder="0" allowfullscreen="" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
+    </div>
+  </div>
+
+  <!-- Mood -->
+  <div class="bgm-w-mood">
+    &#9835; feeling: <em>good vibes only</em> &#9835;
+  </div>
+</div>
+
+<script>
+function toggleBgm(e) {
+  e.stopPropagation();
+  var widget = document.getElementById('bgm-widget');
+  var btn = document.getElementById('bgm-toggle');
+  if (widget.classList.contains('minimized')) {
+    widget.classList.remove('minimized');
+    btn.textContent = '\u2013'; // – (minus)
+  } else {
+    widget.classList.add('minimized');
+    btn.textContent = '+';
+  }
+}
+// Click on minimized circle to expand
+document.getElementById('bgm-widget').addEventListener('click', function(e) {
+  if (this.classList.contains('minimized')) {
+    toggleBgm(e);
+  }
+});
+</script>

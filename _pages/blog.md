@@ -5,7 +5,6 @@ title: blog
 nav: true
 nav_order: 1
 lang: en
-lang_alt: /ko/blog/
 pagination:
   enabled: true
   collection: posts

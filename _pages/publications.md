@@ -6,7 +6,6 @@ description:
 nav: true
 nav_order: 2
 lang: en
-lang_alt: /ko/publications/
 ---
 
 <!-- _pages/publications.md -->

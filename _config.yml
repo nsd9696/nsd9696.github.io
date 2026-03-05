@@ -13,7 +13,7 @@ description: > # the ">" symbol means to ignore newlines until "footer_text:"
 footer_text: ""
 keywords: jekyll, jekyll-theme, academic-website, portfolio-website # add your own keywords or leave empty
 lang: en # the language of your site (for example: en, fr, cn, ru, etc.)
-languages: ["en", "ko"] # supported languages
+languages: ["en"] # supported languages
 default_lang: "en" # default language (no URL prefix)
 icon: 🌉 # the emoji used as the favicon (alternatively, provide image name in /assets/img/)
 

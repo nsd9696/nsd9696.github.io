@@ -6,7 +6,6 @@ description: Course materials, schedules, and resources for classes taught.
 nav: false
 nav_order: 6
 lang: en
-lang_alt: /ko/teaching/
 calendar: true
 ---
 
