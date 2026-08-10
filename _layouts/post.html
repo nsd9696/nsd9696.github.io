@@ -1,0 +1,32 @@
+---
+layout: default
+---
+<article class="post">
+  <aside class="post-toc" aria-label="Table of contents">
+    <div class="toc-inner">
+      <p class="toc-head">Contents</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+  <div class="post-main">
+    <header class="post-header">
+      {% if page.categories %}<p class="eyebrow">{{ page.categories | join: " · " }}</p>{% endif %}
+      <h1 class="post-title">{{ page.title }}</h1>
+      <p class="post-meta">
+        <span>Lucas Nam</span>
+        <span>{{ page.date | date: "%B %-d, %Y" }}</span>
+        <span>{{ content | number_of_words | divided_by: 200 | plus: 1 }} min read</span>
+      </p>
+      {% if page.description %}<p class="post-lede">{{ page.description }}</p>{% endif %}
+    </header>
+    <div class="post-content">
+      {{ content }}
+    </div>
+    {% if page.tags %}
+    <footer class="post-footer">
+      {% assign tags = page.tags | split: " " %}
+      {% for t in tags %}<a class="tag" href="#">{{ t }}</a>{% endfor %}
+    </footer>
+    {% endif %}
+  </div>
+</article>

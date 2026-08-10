@@ -54,14 +54,12 @@ A CUDA Graph is a DAG (Directed Acyclic Graph) where each node represents an ope
 
 To visualize what a CUDA Graph DAG looks like for the LLM decode stage, consider the following pipeline. Each box represents a graph node with its operation type, kernel function, launch configuration, and arguments:
 
-<div class="row mt-3">
-    <div class="col-sm mt-3 mt-md-0">
-        {% include figure.liquid loading="eager" path="assets/img/blog_cuda_graph_1.png" class="img-fluid rounded z-depth-1 d-block mx-auto" width="80%" zoomable=true %}
-    </div>
-</div>
-<div class="caption">
-    CUDA Graph DAG for a single Transformer decoder layer during inference. Root nodes (Memset and H2D Memcpy) have no dependencies and can execute concurrently. RoPE for Q and K also fork in parallel before joining at the Flash Attention node.
-</div>
+
+
+![CUDA Graph DAG for a single Transformer decoder layer during inference. Root nodes (Memset and H2D Memcpy) have no dependencies and can execute concurrently. RoPE for Q and K also fork in parallel before joining at the Flash Attention node.](/assets/img/blog_cuda_graph_1.png)
+*CUDA Graph DAG for a single Transformer decoder layer during inference. Root nodes (Memset and H2D Memcpy) have no dependencies and can execute concurrently. RoPE for Q and K also fork in parallel before joining at the Flash Attention node.*
+
+
 
 Key observations:
 
@@ -209,14 +207,12 @@ vLLM uses PagedAttention for efficient KV Cache management. The KV Cache is mana
 
 vLLM caches graphs per batch size. On a cache miss, it captures a new graph; on a cache hit, it updates static buffers and replays.
 
-<div class="row mt-3">
-    <div class="col-sm mt-3 mt-md-0">
-        {% include figure.liquid loading="eager" path="assets/img/blog_cuda_graph_2.png" class="img-fluid rounded z-depth-1 d-block mx-auto" width="80%" zoomable=true %}
-    </div>
-</div>
-<div class="caption">
-    vLLM CUDA Graph execution stack. The CudagraphDispatcher analyzes each batch and selects the runtime mode. The CUDAGraphWrapper manages per-batch-size graph caching, capturing new graphs on cache miss and replaying on cache hit.
-</div>
+
+
+![vLLM CUDA Graph execution stack. The CudagraphDispatcher analyzes each batch and selects the runtime mode. The CUDAGraphWrapper manages per-batch-size graph caching, capturing new graphs on cache miss and replaying on cache hit.](/assets/img/blog_cuda_graph_2.png)
+*vLLM CUDA Graph execution stack. The CudagraphDispatcher analyzes each batch and selects the runtime mode. The CUDAGraphWrapper manages per-batch-size graph caching, capturing new graphs on cache miss and replaying on cache hit.*
+
+
 
 ### Why Attention Is Problematic for CUDA Graphs
 

@@ -1,0 +1,13 @@
+---
+layout: default
+---
+<div class="about">
+  <header class="about-head">
+    <h1 class="about-name">{{ site.author_name | default: "Lucas Sangdae Nam" }}</h1>
+    <p class="about-subtitle">AI Research Engineer @ <a href="https://vessl.ai/">VESSL AI</a> | UC Berkeley | ex-Intel</p>
+  </header>
+  <img class="about-photo" src="{{ '/assets/img/prof_pic.jpg' | relative_url }}" alt="Lucas Sangdae Nam">
+  <div class="about-bio">
+    {{ content }}
+  </div>
+</div>

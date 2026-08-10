@@ -56,14 +56,12 @@ This is exactly what **NIXL** (NVIDIA Inference Xfer Library) is designed to sol
 
 ## 2. NIXL Architecture Overview
 
-<div class="row mt-3">
-    <div class="col-sm mt-3 mt-md-0">
-        {% include figure.liquid loading="eager" path="assets/img/blog_nixl_1.png" class="img-fluid rounded z-depth-1 d-block mx-auto" width="80%" zoomable=true %}
-    </div>
-</div>
-<div class="caption">
-    NIXL Architecture — from inference frameworks down to hardware transport layers.
-</div>
+
+
+![NIXL Architecture — from inference frameworks down to hardware transport layers.](/assets/img/blog_nixl_1.png)
+*NIXL Architecture — from inference frameworks down to hardware transport layers.*
+
+
 
 NIXL's **Transfer Agent** abstracts three core entities:
 
@@ -77,14 +75,12 @@ The Transfer Backend Interface abstracts different transport backends from the A
 - Source is DRAM, destination is VRAM → select **UCX**
 - VRAM to parallel file system → select **GPUDirect Storage**
 
-<div class="row mt-3">
-    <div class="col-sm mt-3 mt-md-0">
-        {% include figure.liquid loading="eager" path="assets/img/blog_nixl_2.png" class="img-fluid rounded z-depth-1 d-block mx-auto" width="80%" zoomable=true %}
-    </div>
-</div>
-<div class="caption">
-    NIXL Backend Selection Flow — from memory type identification to final backend selection.
-</div>
+
+
+![NIXL Backend Selection Flow — from memory type identification to final backend selection.](/assets/img/blog_nixl_2.png)
+*NIXL Backend Selection Flow — from memory type identification to final backend selection.*
+
+
 
 When a user does not explicitly specify a backend, NIXL's selection engine follows a 4-step process:
 1. **Identify memory types** from local and remote descriptors (e.g., VRAM)
@@ -193,14 +189,12 @@ The key design is that **create and post are separated**. `create` handles backe
 
 Combining these three entities, the Transfer Agent accepts **buffer list primitives** (non-contiguous GPU memory address lists from PagedAttention) and returns an **async handle**. All transfers are non-blocking — `post_xfer_req()` returns immediately, and `get_xfer_status()` checks completion — preventing the GPU from sitting idle during transfer.
 
-<div class="row mt-3">
-    <div class="col-sm mt-3 mt-md-0">
-        {% include figure.liquid loading="eager" path="assets/img/blog_nixl_3.png" class="img-fluid rounded z-depth-1 d-block mx-auto" width="80%" zoomable=true %}
-    </div>
-</div>
-<div class="caption">
-    NIXL Transfer Request Lifecycle — from composing buffer lists to release.
-</div>
+
+
+![NIXL Transfer Request Lifecycle — from composing buffer lists to release.](/assets/img/blog_nixl_3.png)
+*NIXL Transfer Request Lifecycle — from composing buffer lists to release.*
+
+
 
 **READ vs WRITE**: WRITE means the Prefill Worker pushes its KV Cache directly into the Decode Worker's memory (push model). READ means the Decode Worker pulls from the Prefill Worker's memory (pull model). Both are RDMA one-sided operations requiring no CPU involvement on the remote side. vLLM's NixlConnector uses the WRITE mode.
 

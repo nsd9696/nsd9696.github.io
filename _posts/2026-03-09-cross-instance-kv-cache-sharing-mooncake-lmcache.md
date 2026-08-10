@@ -119,7 +119,12 @@ Key parameters:
 - **`global_segment_size`**: Amount of memory (in bytes) allocated per worker in the Mooncake pool.
 - **`protocol`**: Transport protocol used for chunk transfer between workers (`tcp` or `rdma`).
 
-{% include figure.liquid loading="eager" path="assets/img/blog_mooncacke_1.png" class="img-fluid rounded z-depth-1 d-block mx-auto" width="80%" zoomable=true caption="Cross-Instance KV Cache Sharing architecture with LMCache + Mooncake. Orange path shows cold request flow (full prefill compute), blue dashed path shows cross-instance cache hit flow (KV fetched from Mooncake), and green path shows prefill-to-decode transfer via NixlConnector." %}
+
+
+![Cross-Instance KV Cache Sharing architecture with LMCache + Mooncake. Orange path shows cold request flow (full prefill compute), blue dashed path shows cross-instance cache hit flow (KV fetched from Mooncake), and green path shows prefill-to-decode transfer via NixlConnector.](/assets/img/blog_mooncacke_1.png)
+*Cross-Instance KV Cache Sharing architecture with LMCache + Mooncake. Orange path shows cold request flow (full prefill compute), blue dashed path shows cross-instance cache hit flow (KV fetched from Mooncake), and green path shows prefill-to-decode transfer via NixlConnector.*
+
+
 
 ## 4. Cache-Aware Routing
 

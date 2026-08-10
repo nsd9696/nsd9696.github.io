@@ -1,0 +1,15 @@
+---
+layout: default
+title: "Blog"
+permalink: /blog/
+---
+<div class="bloglist">
+  <h1 class="bloglist-head">Blog</h1>
+  {% for post in site.posts %}
+  <article class="index-item">
+    <a class="index-link" href="{{ post.url | relative_url }}"><h3 class="index-title">{{ post.title }}</h3></a>
+    <p class="index-meta">{{ post.date | date: "%b %-d, %Y" }} · {{ post.categories | join: ", " }} · {{ post.content | number_of_words | divided_by: 200 | plus: 1 }} min</p>
+    <p class="index-desc">{{ post.description | strip_html | truncate: 210 }}</p>
+  </article>
+  {% endfor %}
+</div>

@@ -1,0 +1,42 @@
+---
+layout: page
+title: Publications
+description: Selected papers.
+permalink: /publications/
+---
+
+<ol class="pub-list">
+
+  <li class="pub">
+    <span class="pub-venue">ICML 2026 · SPIGM Workshop</span>
+    <a class="pub-title" href="https://arxiv.org/abs/2606.00091">DLLM-JEPA: Joint Embedding Predictive Architectures for Masked Diffusion Language Models</a>
+    <p class="pub-authors"><strong>Sangdae Nam</strong></p>
+    <p class="pub-abstract">JEPAs reshaped self-supervised representation learning in vision. LLM-JEPA ported the idea to autoregressive LLMs but inherited two costs: explicit multi-view data (e.g., text–code pairs) and two gradient-carrying forward passes per step. DLLM-JEPA pairs JEPA with masked-diffusion language models to remove both at once — using the diffusion noise schedule to build two views from a single input, cutting JEPA training FLOPs ~33% via a single gradient pass per step.</p>
+    <p class="pub-links"><a href="https://arxiv.org/abs/2606.00091">arXiv:2606.00091</a></p>
+  </li>
+
+  <li class="pub">
+    <span class="pub-venue">AAAI 2026 · XAI4Science Workshop</span>
+    <a class="pub-title" href="https://arxiv.org/abs/2510.22176v1">Towards Explainable Inverse Design for Photonics via Integrated Gradients</a>
+    <p class="pub-authors">Junho Park, Taehan Kim, <strong>Sangdae Nam</strong></p>
+    <p class="pub-abstract">Inverse design uses optimization to automatically create compact, high-performance photonic structures, but adjoint-based free-form layouts are hard to interpret under fabrication variability. We present an experimentally validated interpretability workflow that produces pixel-level sensitivity maps on the binary mask of an inverse-designed device, attributing predicted transmission to individual pixels via Integrated Gradients.</p>
+    <p class="pub-links"><a href="https://arxiv.org/abs/2510.22176v1">arXiv:2510.22176</a></p>
+  </li>
+
+  <li class="pub">
+    <span class="pub-venue">arXiv · 2025</span>
+    <a class="pub-title" href="https://arxiv.org/abs/2510.02734">SAE-RNA: A Sparse Autoencoder Model for Interpreting RNA Language Model Representations</a>
+    <p class="pub-authors">Taehan Kim, <strong>Sangdae Nam</strong></p>
+    <p class="pub-abstract">We introduce SAE-RNA, a tool for interpreting RiNALMo RNA language model representations. It maps internal representations to known biological features and frames RNA interpretability as concept discovery without requiring end-to-end retraining — supporting hypothesis generation about previously unrecognized relationships between RNA groups.</p>
+    <p class="pub-links"><a href="https://arxiv.org/abs/2510.02734">arXiv:2510.02734</a></p>
+  </li>
+
+  <li class="pub">
+    <span class="pub-venue">NAACL 2024 · ACL Main (poster)</span>
+    <a class="pub-title" href="https://arxiv.org/abs/2402.11597">Multi-Task Inference: Can Large Language Models Follow Multiple Instructions at Once?</a>
+    <p class="pub-authors">Guijin Son, Sangwon Baek, <strong>Sangdae Nam</strong>, Ilgyun Jeong, Seungone Kim</p>
+    <p class="pub-abstract">We introduce MTI-Bench, a benchmark with 5,000 instances across 25 tasks, each containing 2–3 sub-tasks. Multi-task inference reduces latency by ~1.46×, and models like Llama-2-Chat-70B and GPT-4 show improvements of up to 7.3% and 12.4% over single-task processing.</p>
+    <p class="pub-links"><a href="https://arxiv.org/abs/2402.11597">arXiv:2402.11597</a></p>
+  </li>
+
+</ol>
