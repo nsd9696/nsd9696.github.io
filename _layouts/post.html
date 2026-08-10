@@ -24,8 +24,7 @@ layout: default
     </div>
     {% if page.tags %}
     <footer class="post-footer">
-      {% assign tags = page.tags | split: " " %}
-      {% for t in tags %}<a class="tag" href="#">{{ t }}</a>{% endfor %}
+      {% for t in page.tags %}<a class="tag" href="#">#{{ t }}</a>{% endfor %}
     </footer>
     {% endif %}
   </div>
