@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="580" viewBox="0 0 700 580" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+  <rect width="700" height="580" fill="#ffffff"/>
+  <defs>
+    <marker id="dn2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 z" fill="#8a9099"/>
+    </marker>
+  </defs>
+
+  <text x="30" y="30" font-size="10.5" fill="#8a9099" letter-spacing="1.4">WHY MORE TENSOR PARALLELISM DID NOT BUY CAPACITY</text>
+  <text x="30" y="54" font-size="16.5" fill="#1a1d21" font-weight="600">MLA cannot shard latent KV inside an attention group.</text>
+
+  <!-- ── TP16 ── -->
+  <text x="130" y="88" font-size="13" fill="#1a1d21" font-weight="600">TP16 — one attention group</text>
+  <rect x="130" y="98" width="441" height="123" rx="6" fill="#fbfbfc" stroke="#c3c8cf"/>
+  <g fill="#c2410c">
+    <rect x="142" y="110" width="46" height="46" rx="4"/><rect x="195" y="110" width="46" height="46" rx="4"/>
+    <rect x="248" y="110" width="46" height="46" rx="4"/><rect x="301" y="110" width="46" height="46" rx="4"/>
+    <rect x="354" y="110" width="46" height="46" rx="4"/><rect x="407" y="110" width="46" height="46" rx="4"/>
+    <rect x="460" y="110" width="46" height="46" rx="4"/><rect x="513" y="110" width="46" height="46" rx="4"/>
+    <rect x="142" y="163" width="46" height="46" rx="4"/><rect x="195" y="163" width="46" height="46" rx="4"/>
+    <rect x="248" y="163" width="46" height="46" rx="4"/><rect x="301" y="163" width="46" height="46" rx="4"/>
+    <rect x="354" y="163" width="46" height="46" rx="4"/><rect x="407" y="163" width="46" height="46" rx="4"/>
+    <rect x="460" y="163" width="46" height="46" rx="4"/><rect x="513" y="163" width="46" height="46" rx="4"/>
+  </g>
+  <text x="350" y="243" font-size="12.5" fill="#5c646d" text-anchor="middle">16 GPUs holding 16 identical copies of the same KV</text>
+  <text x="350" y="266" font-size="14" fill="#c2410c" text-anchor="middle" font-weight="700">1 pool</text>
+
+  <!-- ── transition ── -->
+  <path d="M350 286 L 350 306" stroke="#8a9099" stroke-width="1.3" marker-end="url(#dn2)"/>
+  <text x="366" y="301" font-size="11.5" fill="#5c646d" font-family="Menlo, monospace">dp = 2</text>
+
+  <!-- ── dp2 ── -->
+  <text x="109" y="336" font-size="13" fill="#1a1d21" font-weight="600">dp-attention — two groups of 8</text>
+  <rect x="109" y="346" width="229" height="123" rx="6" fill="#fbfbfc" stroke="#c3c8cf"/>
+  <g fill="#0f766e">
+    <rect x="121" y="358" width="46" height="46" rx="4"/><rect x="174" y="358" width="46" height="46" rx="4"/>
+    <rect x="227" y="358" width="46" height="46" rx="4"/><rect x="280" y="358" width="46" height="46" rx="4"/>
+    <rect x="121" y="411" width="46" height="46" rx="4"/><rect x="174" y="411" width="46" height="46" rx="4"/>
+    <rect x="227" y="411" width="46" height="46" rx="4"/><rect x="280" y="411" width="46" height="46" rx="4"/>
+  </g>
+  <rect x="362" y="346" width="229" height="123" rx="6" fill="#fbfbfc" stroke="#c3c8cf"/>
+  <g fill="#0f766e">
+    <rect x="374" y="358" width="46" height="46" rx="4"/><rect x="427" y="358" width="46" height="46" rx="4"/>
+    <rect x="480" y="358" width="46" height="46" rx="4"/><rect x="533" y="358" width="46" height="46" rx="4"/>
+    <rect x="374" y="411" width="46" height="46" rx="4"/><rect x="427" y="411" width="46" height="46" rx="4"/>
+    <rect x="480" y="411" width="46" height="46" rx="4"/><rect x="533" y="411" width="46" height="46" rx="4"/>
+  </g>
+  <text x="350" y="491" font-size="12.5" fill="#5c646d" text-anchor="middle">each group keeps its own KV</text>
+  <text x="350" y="514" font-size="14" fill="#0f766e" text-anchor="middle" font-weight="700">2 independent pools</text>
+
+  <line x1="30" y1="536" x2="670" y2="536" stroke="#e4e7ea"/>
+  <text x="30" y="557" font-size="11.5" fill="#3c434b">Adding tensor parallelism buys more copies, not more capacity. Splitting the group is what grows the pool.</text>
+  <text x="30" y="574" font-size="11.5" fill="#6b7280">With FP8 attention weights and memory tuning on top: 888,960 &#8594; 2,213,760 tokens (2.49&#215;).</text>
+</svg>
