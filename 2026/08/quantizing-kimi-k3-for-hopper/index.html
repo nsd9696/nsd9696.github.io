@@ -46,7 +46,7 @@
       <p class="post-meta">
         <span>Lucas Nam</span>
         <span>August 9, 2026</span>
-        <span>15 min read</span>
+        <span>13 min read</span>
       </p>
       <p class="post-lede">Requantizing Kimi-K3 from MXFP4 to W4AFP8 for H200 — why the original format was unusable on Hopper, which layers we could and couldn't touch, and the wrong turns we took proving the result was equivalent.</p>
     </header>
@@ -55,7 +55,7 @@
 
 <p>It was not. The model loaded fine and then ran at a speed that made no sense — worse, in some configurations, than we had any right to expect from hardware this size. Working out <em>why</em> took us through the MoE runner matrix, a KV cache path that was quietly undoing its own optimization, and eventually to rebuilding the checkpoint ourselves.</p>
 
-<p>This post is about that rebuild: what we changed, what we deliberately left alone, and the several times we were confidently wrong along the way.</p>
+<p>This post is about that rebuild: what we changed, what we deliberately left alone, and why.</p>
 
 <p><img src="/assets/img/k3-precision-map.png" alt="Precision map of the Kimi-K3-W4AFP8 checkpoint. Routed experts — 247,296 of 249,694 weight tensors — became INT4 at group size 128 with FP8 activations. The remaining 0.96% is expanded below: 393 attention projections in FP8, everything else left in bf16." />
 <em>What each of the 2.8T model’s weight tensors became. Experts are 99% of the tensors and tolerate 4 bits; attention mostly stayed as it was.</em></p>
@@ -182,15 +182,15 @@
   </tbody>
 </table>
 
-<p>The asymmetry is the whole argument. In a MoE model, a routed expert sees maybe a few percent of tokens, and a quantization error in one expert gets diluted by the fifteen others that weren’t picked. Attention has no such mercy — every token passes through every attention layer, and the errors compound rather than cancel.</p>
+<p>The asymmetry is the whole argument. Kimi-K3 routes each token to 16 of 896 experts, so any given expert sees under 2% of traffic, and an error in one of the 16 that did fire is averaged against the other 15. Attention has no such mercy — every token passes through every attention layer, and the errors compound rather than cancel.</p>
 
 <p>That’s also why experts are the right target economically. They’re 99% of the tensors and nearly all of the parameter mass, so you get almost the entire size reduction from the part of the model that tolerates it best.</p>
 
-<h3 id="the-requantization-error-was-smaller-than-we-expected">The requantization error was smaller than we expected</h3>
+<h3 id="going-through-mxfp4-beats-going-through-bf16">Going through MXFP4 beats going through bf16</h3>
 
-<p>We measured the conversion error and got <strong>8.11%</strong>. Then we measured a control — taking the same tensors from bf16 and quantizing straight to INT4 — and got <strong>10.8–12.2%</strong>.</p>
+<p>The conversion error measured <strong>8.11%</strong>. The control — taking the same tensors from bf16 and quantizing straight to INT4 — measured <strong>10.8–12.2%</strong>.</p>
 
-<p>Going through MXFP4 first was <em>better</em> than starting from full precision. That seemed backwards until we remembered that Kimi-K3 is a QAT model. The MXFP4 grid isn’t a lossy approximation of some truer bf16 value; the training process put the weights on that grid deliberately. Moving from one 4-bit grid to another is a smaller step than moving down from 16 bits.</p>
+<p>Starting from the 4-bit grid is <em>better</em> than starting from full precision, which is backwards until you account for Kimi-K3 being a QAT model. The MXFP4 grid isn’t a lossy approximation of some truer bf16 value; training put the weights on that grid deliberately. Moving from one 4-bit grid to another is a smaller step than moving down from 16 bits.</p>
 
 <p>We also tested whether calibration-based methods like AWQ would help. They didn’t — the difference from plain round-to-nearest wasn’t statistically significant (the 95% confidence interval included zero). So we skipped it.</p>
 
@@ -198,7 +198,7 @@
 
 <h2 id="part-3--proving-it-didnt-break-anything">Part 3 — Proving it didn’t break anything</h2>
 
-<p>This is the part that took the longest, and where most of our mistakes lived.</p>
+<p>This is the part that took the longest.</p>
 
 <h3 id="the-bar-2σ-not-looks-about-the-same">The bar: 2σ, not “looks about the same”</h3>
 
@@ -266,29 +266,15 @@
 
 <p>All six inside the interval. And one honest caveat that belongs right next to the table: <strong>AA-LCR’s +7.3 is not an improvement.</strong> It’s LLM-judge scored, and we never ran a control through the same judge. A number that beats the reference by that much, on the benchmark with the loosest error bars, is exactly the kind of result you should distrust from your own harness.</p>
 
-<h3 id="model-card-numbers-are-not-benchmarks">Model card numbers are not benchmarks</h3>
+<h3 id="what-the-controls-actually-are">What the controls actually are</h3>
 
-<p>The single most expensive lesson: <strong>you cannot use a model card figure as a control until you know what it measured.</strong></p>
+<p>A published number is only a control once you know what it measured, and for several of these the answer takes some digging.</p>
 
-<p>MMMU-Pro has three subsets — standard 4-option, standard 10-option, and vision. All three have exactly 1,730 items, so you can’t tell them apart by count. We started with 4-option, scored 95%, and briefly felt very good about ourselves. It’s the easiest of the three. We moved to 10-option. Also not it. The official number turned out to be <strong>vision</strong>, which we only pinned down by cross-referencing a third-party reproduction that reported both MMMU and GPQA from the same run.</p>
+<p><strong>MMMU-Pro</strong> has three subsets — 4-option, 10-option, and vision — all with exactly 1,730 items, so the count doesn’t identify them. The reference is <strong>vision</strong>. The card’s <code class="language-plaintext highlighter-rouge">81.6 / 83.4</code> pair is without and with tool augmentation, so a harness without tools compares against 81.6.</p>
 
-<p>Kimi-K3’s card also lists <code class="language-plaintext highlighter-rouge">81.6 / 83.4</code> for MMMU-Pro. We assumed those were config variants. They’re <strong>without and with tool augmentation</strong> — so for a harness without tools, only 81.6 is a valid control.</p>
+<p><strong>SciCode</strong> runs through the official <code class="language-plaintext highlighter-rouge">gencode.py</code>, which injects scaffolding into three steps and takes a <code class="language-plaintext highlighter-rouge">with_background</code> flag that <em>adds</em> annotated background rather than replacing anything. The reference has it on. Both settings matter: dropping the scaffolding cascades 22 of 288 sub-steps into failure, and turning background off costs 15.6 points — neither has anything to do with quantization.</p>
 
-<h3 id="you-have-to-read-the-official-eval-code">You have to read the official eval code</h3>
-
-<p>We kept finding differences that no README mentioned.</p>
-
-<p>SciCode’s official <code class="language-plaintext highlighter-rouge">gencode.py</code> injects scaffolding code into three of the steps. If you don’t provide it, 22 of 288 sub-steps fail in a cascade, and you’d score 7.6 points lower for reasons that have nothing to do with your model.</p>
-
-<p>Worse, there’s a flag called <code class="language-plaintext highlighter-rouge">with_background</code> whose name reads backwards from what it does. It <em>adds</em> annotated background to the prompt rather than replacing anything, and the official control has it <strong>on</strong>. We had turned it off, reasoning that removing extra context was the conservative choice. It wasn’t — it was a handicap we’d applied to ourselves, and we nearly attributed the resulting 15.6-point drop to quantization.</p>
-
-<p>The general shape of that mistake: <strong>you can’t judge which direction a bias runs until you know exactly what the control did.</strong></p>
-
-<h3 id="two-more-traps-worth-naming">Two more traps worth naming</h3>
-
-<p><strong>Re-running only the failures is one-directional.</strong> On Terminal-Bench we re-ran failed tasks and took the latest result. Sixteen of thirty flipped — and every single flip was a gain, fourteen up and zero down. Of course it was: we only gave the failures another chance. The fix is stratified correction, re-running a sample of the passes too.</p>
-
-<p><strong>Truncation is measurement failure, not a wrong answer.</strong> When a response hits the token limit mid-reasoning, scoring it as incorrect understates the model. We treat truncated items separately and re-run them, being careful not to double-count them in both the “correct” and “re-run correct” buckets.</p>
+<p><strong>Truncation is measurement failure, not a wrong answer.</strong> Responses that hit the token limit mid-reasoning are re-run rather than scored incorrect, and counted once.</p>
 
 <hr />
 
@@ -355,19 +341,15 @@
   kimi_k3.py  forget_gate = gemm(bfa[..., :n_fa], self.f_b_proj.weight)
 </code></pre></div></div>
 
-<p>We found this by converting everything and watching it crash. Then we audited every raw <code class="language-plaintext highlighter-rouge">.weight</code> access in the model code and excluded the five projections that had one: <code class="language-plaintext highlighter-rouge">kv_b_proj</code>, <code class="language-plaintext highlighter-rouge">q_b_proj</code>, <code class="language-plaintext highlighter-rouge">f_b_proj</code>, <code class="language-plaintext highlighter-rouge">f_a_proj</code>, <code class="language-plaintext highlighter-rouge">b_proj</code>. Together they’re 2.4 GB we left on the table, and recovering them would mean patching the model code, not the checkpoint.</p>
+<p>So the exclusion list is every projection with a raw <code class="language-plaintext highlighter-rouge">.weight</code> reader: <code class="language-plaintext highlighter-rouge">kv_b_proj</code>, <code class="language-plaintext highlighter-rouge">q_b_proj</code>, <code class="language-plaintext highlighter-rouge">f_b_proj</code>, <code class="language-plaintext highlighter-rouge">f_a_proj</code>, <code class="language-plaintext highlighter-rouge">b_proj</code>. Together they’re 2.4 GB left on the table, and recovering them would mean patching the model code, not the checkpoint. Note the readers aren’t all reached through <code class="language-plaintext highlighter-rouge">self.</code> — <code class="language-plaintext highlighter-rouge">self_attn.kv_b_proj.weight</code> is one of them, so grep by attribute, not by receiver.</p>
 
-<p>Our first audit missed one, incidentally. We grepped for accesses starting with <code class="language-plaintext highlighter-rouge">self.</code> and didn’t catch <code class="language-plaintext highlighter-rouge">self_attn.kv_b_proj.weight</code>. Don’t assume the receiver’s name.</p>
+<h3 id="per-channel-per-tensor-and-why-it-doesnt-matter-here">Per-channel, per-tensor, and why it doesn’t matter here</h3>
 
-<h3 id="two-things-we-were-wrong-about">Two things we were wrong about</h3>
+<p>Two scale granularities are in play. The runtime path quantizes attention weights <strong>per-channel</strong>; the serialized path used for a baked checkpoint expects <strong>per-tensor</strong>, because <code class="language-plaintext highlighter-rouge">convert_to_channelwise</code> indexes scales per logical shard. Activations are per-tensor dynamic in both.</p>
 
-<p><strong>“It’s per-tensor.”</strong> We wrote that in the patch comments and repeated it for weeks. We’d seen <code class="language-plaintext highlighter-rouge">weight_block_size=None</code> and concluded that meant per-tensor. It doesn’t — it means <em>not block-quantized</em>, and inside that branch the cutlass path picks <strong>per-channel</strong>. The weights were per-channel the whole time. Only the activations are per-tensor.</p>
+<p>Dropping to per-tensor costs almost nothing. On a <code class="language-plaintext highlighter-rouge">q_proj</code> where row-wise amax varies by <strong>26×</strong>, relative error goes from 2.638% to 2.647%. FP8 has an exponent field, and e4m3’s normal range spans roughly 2¹⁵, so a 26× spread is absorbed. That is specific to floating-point formats — the intuition that per-tensor is destructive comes from INT8, where a fixed step size across a wide row makes it so.</p>
 
-<p>Ironically, when we later needed to bake the scales into the checkpoint, the serialized path <em>does</em> expect per-tensor, and we measured whether that hurt. It didn’t: on a tensor where row-wise amax varied by 26×, relative error went from 2.638% to 2.647%. FP8 has an exponent field, so a 26× spread fits comfortably inside e4m3’s ~2¹⁵ normal range. Per-channel scaling is insurance here, not the load-bearing part — that intuition comes from INT8, where fixed step size makes per-tensor genuinely destructive.</p>
-
-<p><strong>“An allowlist is safe because it fails loudly.”</strong> It doesn’t fail at all. If a module name doesn’t match, nothing gets quantized and nothing errors. You just quietly get the unoptimized model and conclude the optimization was worthless.</p>
-
-<p>We caught this because we’d added a counter that logs what actually matched. When we enabled dp-attention, <code class="language-plaintext highlighter-rouge">do_fuse_qkvbfg</code> turned off, the fused QKV module got renamed from <code class="language-plaintext highlighter-rouge">fused_qkvg_proj</code> to <code class="language-plaintext highlighter-rouge">qkv_proj</code>, and 45 GB — the single largest item on the list — would have silently reverted to bf16. The log line showing <code class="language-plaintext highlighter-rouge">qkv_proj: 69</code>, matching the KDA layer count exactly, is what told us.</p>
+<p>One thing to watch when applying the patch: the module list is matched by name, and <strong>dp-attention renames the fused QKV module</strong> from <code class="language-plaintext highlighter-rouge">fused_qkvg_proj</code> to <code class="language-plaintext highlighter-rouge">qkv_proj</code> (it turns <code class="language-plaintext highlighter-rouge">do_fuse_qkvbfg</code> off). A name that doesn’t match isn’t an error — it silently leaves 45 GB in bf16 — so the patch logs what it matched. <code class="language-plaintext highlighter-rouge">qkv_proj: 69</code> matching the KDA layer count is the signal that it took.</p>
 
 <h3 id="where-the-memory-went">Where the memory went</h3>
 
@@ -413,13 +395,7 @@
 
 <hr />
 
-<h2 id="what-wed-tell-ourselves-at-the-start">What we’d tell ourselves at the start</h2>
-
-<p><strong>The bottleneck is rarely the number you’re staring at.</strong> FP8 KV cache looked like a memory optimization that had gone wrong. It was actually a dtype cast doing fifty times more work than needed, in a fallback path we didn’t know existed, because of a head-dimension check we’d never read.</p>
-
-<p><strong>Silent failures are the expensive ones.</strong> Every crash we hit cost an afternoon. The two near-misses that would have cost weeks — a 45 GB tensor quietly staying in bf16, and a scale broadcast that would have loaded fine and produced garbage — both failed <em>quietly</em>. Now we log what matched, not just what broke.</p>
-
-<p><strong>Your control needs as much scrutiny as your candidate.</strong> More of our accuracy debugging went into understanding what the published numbers measured than into measuring our own. Subset, tooling, prompt scaffolding, judge — get all four wrong and you’ll confidently attribute an evaluation artifact to your quantization.</p>
+<h2 id="running-it-yourself">Running it yourself</h2>
 
 <p>The checkpoint is public at <a href="https://huggingface.co/vessl/Kimi-K3-W4AFP8"><code class="language-plaintext highlighter-rouge">vessl/Kimi-K3-W4AFP8</code></a>. It ships with a patch script, because SGLang’s <code class="language-plaintext highlighter-rouge">W4AFp8Config</code> hardcodes block-wise FP8 for every non-MoE linear and doesn’t read <code class="language-plaintext highlighter-rouge">ignored_layers</code> from config. Upstream work to make that configurable is in flight (<a href="https://github.com/sgl-project/sglang/pull/16643">sglang#16643</a>, <a href="https://github.com/sgl-project/sglang/pull/22806">#22806</a>); when it lands, the patch goes away.</p>
 
