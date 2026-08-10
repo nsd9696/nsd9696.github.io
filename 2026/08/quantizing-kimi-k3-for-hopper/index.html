@@ -360,38 +360,7 @@
 <p><img src="/assets/img/k3-dp-attention-kv.png" alt="Under TP16, all 16 ranks form one attention group and hold identical copies of the same latent KV, so the pool does not grow with parallelism. With dp-attention set to 2, the ranks split into two groups of 8, each keeping its own KV pool." />
 <em>The counterintuitive part: scaling tensor parallelism up buys copies, not capacity. Splitting the group is what grows the pool.</em></p>
 
-<p>What we ended up with:</p>
-
-<table>
-  <thead>
-    <tr>
-      <th> </th>
-      <th> </th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>KV pool</td>
-      <td>2,213,760 tokens</td>
-    </tr>
-    <tr>
-      <td>longest single request</td>
-      <td>1,048,487 tokens (99.99% of the model max)</td>
-    </tr>
-    <tr>
-      <td>two concurrent 900K requests</td>
-      <td>1,800,178 tokens, both completed</td>
-    </tr>
-    <tr>
-      <td>production traffic replay</td>
-      <td>1,189,102 tokens/min, zero errors</td>
-    </tr>
-    <tr>
-      <td>needle-in-haystack, 8K–1M</td>
-      <td>12/12 at depths 10/50/90%</td>
-    </tr>
-  </tbody>
-</table>
+<p>With the pool out to roughly 2M tokens, the endpoint held steady under a replay of production traffic at 1M tokens per minute, and needle-in-a-haystack passed 12/12 from 8K to 1M at depths of 10, 50 and 90%.</p>
 
 <hr />
 
