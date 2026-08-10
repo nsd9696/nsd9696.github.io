@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // apply saved theme before paint to avoid flash
+    (function(){ var t='light'; try{ t=localStorage.getItem('theme')||'light'; }catch(e){} document.documentElement.setAttribute('data-theme', t); })();
+  </script>
+  <title>MoE Expert FFN Backend: experts_implementation · Lucas Nam</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,380;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+  <header class="site-head">
+    <div class="head-wrap">
+      <a class="brand" href="/">
+        <span class="brand-name">Lucas Nam</span>
+        <span class="brand-tag">engineering notes</span>
+      </a>
+      <nav class="site-nav">
+        <a href="/">About</a>
+        <a href="/blog/">Blog</a>
+        <a href="/publications/">Publications</a>
+        <a href="https://x.com/lucas_nam96">X</a>
+        <a href="https://www.linkedin.com/in/lucas-sangdae-nam-635a36193/">LinkedIn</a>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle light/dark theme">
+          <span class="icon-light">☀</span><span class="icon-dark">☾</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+  <main><article class="post">
+  <aside class="post-toc" aria-label="Table of contents">
+    <div class="toc-inner">
+      <p class="toc-head">Contents</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+  <div class="post-main">
+    <header class="post-header">
+      <p class="eyebrow">ml-engineering</p>
+      <h1 class="post-title">MoE Expert FFN Backend: experts_implementation</h1>
+      <p class="post-meta">
+        <span>Lucas Nam</span>
+        <span>January 30, 2026</span>
+        <span>3 min read</span>
+      </p>
+      <p class="post-lede">Selecting Expert FFN computation backends (eager, batched_mm, grouped_mm) in HuggingFace Transformers and benchmarking with Solar-Open 100B</p>
+    </header>
+    <div class="post-content">
+      <h2 id="1-experts_implementation">1. experts_implementation</h2>
+
+<p>A <a href="https://github.com/huggingface/transformers/pull/42697">PR (#42697)</a> that adds support for selecting the Expert FFN computation method in MoE models has been merged into HuggingFace Transformers. Just like how <code class="language-plaintext highlighter-rouge">attn_implementation</code> allowed you to choose the attention computation backend, you can now hook into the expert computation and run it with the backend of your choice.</p>
+
+<hr />
+
+<h2 id="2-eager-batched_mm-grouped_mm">2. eager, batched_mm, grouped_mm</h2>
+
+<p>Fundamentally, expert FFN follows the same logic: the router selects top-k experts, performs hidden state projection with expert parameters (<code class="language-plaintext highlighter-rouge">gate_up_proj</code>, <code class="language-plaintext highlighter-rouge">down_proj</code>), and then computes a weighted sum using routing weights. The key difference lies in <strong>how the per-expert matrix multiplications are performed</strong>.</p>
+
+<h3 id="eager-loop-based-reference-implementation">eager: Loop-Based Reference Implementation</h3>
+
+<p>This is the most intuitive approach. It iterates through activated experts one by one using a Python loop, selects only the tokens routed to each expert, and performs per-expert projection on those tokens. However, because it uses <code class="language-plaintext highlighter-rouge">torch.where</code> to select tokens assigned to each expert, it becomes difficult to use with <code class="language-plaintext highlighter-rouge">torch.compile</code> with the <code class="language-plaintext highlighter-rouge">fullgraph=True</code> option.</p>
+
+<h3 id="batched_mm">batched_mm</h3>
+
+<p><code class="language-plaintext highlighter-rouge">batched_mm</code> duplicates the selected expert’s weights for each token, stacks them into a 3D tensor, and performs batched matrix multiplication all at once using <code class="language-plaintext highlighter-rouge">torch.bmm</code>.</p>
+
+<p><code class="language-plaintext highlighter-rouge">torch.bmm</code> stands for Batched Matrix Multiplication — it multiplies pairs of identically-sized matrices all at once.</p>
+
+<p>Since <code class="language-plaintext highlighter-rouge">batched_mm</code> is compatible with <code class="language-plaintext highlighter-rouge">torch.compile</code>, it supports <code class="language-plaintext highlighter-rouge">fullgraph</code>. However, because it copies expert weights, memory usage can more than double compared to eager — making it more advantageous for short sequences or small batch sizes.</p>
+
+<h3 id="grouped_mm">grouped_mm</h3>
+
+<p><code class="language-plaintext highlighter-rouge">grouped_mm</code> uses <code class="language-plaintext highlighter-rouge">torch._grouped_mm</code> to support Grouped GEMM. This approach does not copy weights. Instead, it groups tokens by expert and processes all expert projections simultaneously using the Grouped GEMM kernel.</p>
+
+<p>Since weights are not duplicated, this approach is the most memory-efficient, and it particularly excels with long sequences and large batches.</p>
+
+<p><img src="/assets/img/experts_impl_blog_1.png" alt="Batched Matrix Multiplication (bmm) vs Grouped GEMM Approach" />
+<em>Batched Matrix Multiplication (bmm) vs Grouped GEMM Approach</em></p>
+
+<hr />
+
+<h2 id="3-solar-open-100b-benchmark">3. Solar-Open 100B Benchmark</h2>
+
+<p>Since the PR showed significant performance differences, I ran benchmarks directly using Upstage’s Solar-Open model. Looking at just the Mean Latency, the differences were meaningful. <code class="language-plaintext highlighter-rouge">batched_mm</code> performed reasonably well with short, small inputs, but overall <code class="language-plaintext highlighter-rouge">grouped_mm</code> showed the best performance. Compared to eager, even without compile it was about 4x faster on average, and with compile applied the latency difference reached up to 10x.</p>
+
+<p><img src="/assets/img/solar_latency_summary.png" alt="Solar-Open 100B Latency Comparison (Experts Backend &amp; Torch Compile)" />
+<em>Solar-Open 100B Latency Comparison (Experts Backend &amp; Torch Compile)</em></p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="p">.</span><span class="nf">from_pretrained</span><span class="p">(</span>
+    <span class="sh">"</span><span class="s">upstage/solar-open-...</span><span class="sh">"</span><span class="p">,</span>
+    <span class="n">experts_implementation</span><span class="o">=</span><span class="sh">"</span><span class="s">grouped_mm</span><span class="sh">"</span><span class="p">,</span>  <span class="c1"># or "batched_mm", "eager"
+</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Note that with <code class="language-plaintext highlighter-rouge">batched_mm</code> under <code class="language-plaintext highlighter-rouge">batch_size=4</code>, <code class="language-plaintext highlighter-rouge">seq_len=128</code> conditions, a memory spike was observed during computation in both compile default and no-compile cases. I left the results as-is without separate modifications for reference.</p>
+
+<hr />
+
+<h2 id="4-wrapping-up">4. Wrapping Up</h2>
+
+<p>It would be worth considering these backend options for MoE model inference. However, since vLLM has its own <code class="language-plaintext highlighter-rouge">fused_moe</code> kernel, it cannot be directly used there. I’ll cover the <code class="language-plaintext highlighter-rouge">fused_moe</code> kernel in a future post.</p>
+
+    </div>
+    
+    <footer class="post-footer">
+      
+      <a class="tag" href="#">["moe",</a><a class="tag" href="#">"experts-implementation",</a><a class="tag" href="#">"huggingface",</a><a class="tag" href="#">"transformers",</a><a class="tag" href="#">"torch-compile",</a><a class="tag" href="#">"grouped-gemm"]</a>
+    </footer>
+    
+  </div>
+</article>
+</main>
+  <footer class="site-foot">
+    <div class="foot-wrap">© Lucas Nam — all opinions my own.</div>
+  </footer>
+  <script src="/assets/js/toc.js"></script>
+</body>
+</html>

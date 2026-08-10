@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // apply saved theme before paint to avoid flash
+    (function(){ var t='light'; try{ t=localStorage.getItem('theme')||'light'; }catch(e){} document.documentElement.setAttribute('data-theme', t); })();
+  </script>
+  <title>Cross-Instance KV Cache Sharing for Disaggregated LLM Serving: Cutting TTFT with Mooncake and LMCache · Lucas Nam</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,380;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+  <header class="site-head">
+    <div class="head-wrap">
+      <a class="brand" href="/">
+        <span class="brand-name">Lucas Nam</span>
+        <span class="brand-tag">engineering notes</span>
+      </a>
+      <nav class="site-nav">
+        <a href="/">About</a>
+        <a href="/blog/">Blog</a>
+        <a href="/publications/">Publications</a>
+        <a href="https://x.com/lucas_nam96">X</a>
+        <a href="https://www.linkedin.com/in/lucas-sangdae-nam-635a36193/">LinkedIn</a>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle light/dark theme">
+          <span class="icon-light">☀</span><span class="icon-dark">☾</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+  <main><article class="post">
+  <aside class="post-toc" aria-label="Table of contents">
+    <div class="toc-inner">
+      <p class="toc-head">Contents</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+  <div class="post-main">
+    <header class="post-header">
+      <p class="eyebrow">infrastructure</p>
+      <h1 class="post-title">Cross-Instance KV Cache Sharing for Disaggregated LLM Serving: Cutting TTFT with Mooncake and LMCache</h1>
+      <p class="post-meta">
+        <span>Lucas Nam</span>
+        <span>March 9, 2026</span>
+        <span>11 min read</span>
+      </p>
+      <p class="post-lede">How cross-instance KV cache sharing with Mooncake + LMCache reduces TTFT by 24% in multi-instance disaggregated LLM serving</p>
+    </header>
+    <div class="post-content">
+      <h2 id="tldr">TL;DR</h2>
+
+<p>Disaggregated prefill-decode serving splits LLM inference across multiple instances, but each prefill instance maintains its own isolated KV cache. When the same prompt lands on a different instance, expensive prefill computation repeats from scratch. We implemented <strong>cross-instance KV cache sharing</strong> using Mooncake + LMCache on a multiple prefill-decode vLLM deployment, reducing cross-instance TTFT by <strong>24%</strong> compared to full recomputation.</p>
+
+<hr />
+
+<h2 id="1-the-problem-isolated-kv-caches-in-multi-instance-serving">1. The Problem: Isolated KV Caches in Multi-Instance Serving</h2>
+
+<p>Modern LLM serving at scale requires multiple prefill instances to handle concurrent requests. vLLM’s <strong>Automatic Prefix Caching (APC)</strong> efficiently caches KV tensors within a single instance’s GPU memory — when the same system prompt arrives again at the same instance, prefill computation is skipped entirely.</p>
+
+<p>But what happens when the <strong>same prompt arrives at a different instance</strong>?</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Instance A: "You are an expert in..." → computes KV cache → stores in GPU A
+Instance B: "You are an expert in..." → GPU B has nothing → recomputes from scratch
+</code></pre></div></div>
+
+<p>In a multi-prefill setup, assuming round-robin routing (a load balancing strategy that distributes incoming requests evenly across instances in sequential order), there is a <strong>(N-1)/N chance</strong> that a repeated prompt lands on an instance that doesn’t have its KV cache. This means:</p>
+
+<ul>
+  <li><strong>Wasted GPU compute</strong>: The same prefill computation runs redundantly across instances.</li>
+  <li><strong>Higher TTFT</strong>: Users experience first-token latency equivalent to a cold request, even for prompts the system has seen before.</li>
+  <li><strong>Poor scaling</strong>: Adding more prefill instances actually <em>reduces</em> per-instance cache hit rate.</li>
+</ul>
+
+<p>The core question: <strong>Can we share KV caches across instances so that any instance can serve a cached prompt?</strong></p>
+
+<h2 id="2-what-is-cross-instance-kv-cache-sharing">2. What is Cross-Instance KV Cache Sharing?</h2>
+
+<p>Cross-instance KV cache sharing creates a <strong>distributed KV cache pool</strong> that spans prefill (and optionally decode) instances. When one instance computes KV tensors for a prompt, those tensors are stored in a shared pool. When another instance receives the same prompt, it fetches pre-computed KV tensors from the pool instead of recomputing them.</p>
+
+<p>The cache hierarchy becomes:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Request arrives at Prefill Instance
+  1. Check local GPU cache (APC) → fastest (~0.33s)
+  2. Check distributed cache pool → fast (~0.60s)
+  3. Full recomputation            → slowest (~0.81s)
+</code></pre></div></div>
+
+<p>This is analogous to how CPU caches work: L1 (local APC) is fastest but per-core, while L2/L3 (distributed pool) is shared across cores with slightly higher latency.</p>
+
+<h2 id="3-our-solution-mooncake--lmcache-on-vllm">3. Our Solution: Mooncake + LMCache on vLLM</h2>
+
+<h3 id="architecture-overview">Architecture Overview</h3>
+
+<p>We deployed a <strong>disaggregated serving</strong> setup:</p>
+
+<ul>
+  <li>Multiple prefill instances + multiple decode instances across several nodes</li>
+  <li>Each instance with TP=2 (tensor parallelism)</li>
+  <li>16 A100 80GB GPUs total</li>
+  <li>NIXL + UCX for prefill-to-decode KV transfer</li>
+</ul>
+
+<p>For cross-instance KV cache sharing, we used vLLM’s <strong>MultiConnector</strong>:</p>
+
+<div class="language-json highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="p">{</span><span class="w">
+  </span><span class="nl">"kv_connector"</span><span class="p">:</span><span class="w"> </span><span class="s2">"MultiConnector"</span><span class="p">,</span><span class="w">
+  </span><span class="nl">"kv_role"</span><span class="p">:</span><span class="w"> </span><span class="s2">"kv_both"</span><span class="p">,</span><span class="w">
+  </span><span class="nl">"kv_connector_extra_config"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">
+    </span><span class="nl">"connectors"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="w">
+      </span><span class="p">{</span><span class="w"> </span><span class="nl">"kv_connector"</span><span class="p">:</span><span class="w"> </span><span class="s2">"LMCacheConnectorV1"</span><span class="p">,</span><span class="w"> </span><span class="nl">"kv_role"</span><span class="p">:</span><span class="w"> </span><span class="s2">"kv_both"</span><span class="w"> </span><span class="p">},</span><span class="w">
+      </span><span class="p">{</span><span class="w"> </span><span class="nl">"kv_connector"</span><span class="p">:</span><span class="w"> </span><span class="s2">"NixlConnector"</span><span class="p">,</span><span class="w"> </span><span class="nl">"kv_role"</span><span class="p">:</span><span class="w"> </span><span class="s2">"kv_both"</span><span class="w"> </span><span class="p">}</span><span class="w">
+    </span><span class="p">]</span><span class="w">
+  </span><span class="p">}</span><span class="w">
+</span><span class="p">}</span><span class="w">
+</span></code></pre></div></div>
+
+<ul>
+  <li><strong>LMCacheConnectorV1</strong>: Handles cross-instance prefix caching via Mooncake distributed store</li>
+  <li><strong>NixlConnector</strong>: Handles prefill-to-decode GPU-to-GPU KV transfer via NIXL/UCX</li>
+</ul>
+
+<h3 id="how-multiconnector-works-internally">How MultiConnector Works Internally</h3>
+
+<p>On each request, MultiConnector iterates connectors in config order and calls <code class="language-plaintext highlighter-rouge">get_num_new_matched_tokens()</code> on each. The <strong>first connector that reports a cache hit</strong> is assigned to load KV for that request; all connectors are written to on save.</p>
+
+<p>In our setup, this means LMCacheConnectorV1 (Mooncake) is checked first, and NixlConnector handles prefill-to-decode transfer only when there is no Mooncake hit.</p>
+
+<h3 id="what-is-mooncake">What is Mooncake?</h3>
+
+<p><a href="https://github.com/kvcache-ai/Mooncake">Mooncake</a> (mooncake-transfer-engine) is a distributed KV cache pool originally developed by Moonshot AI. It provides:</p>
+
+<ul>
+  <li><strong>Distributed memory pool</strong>: Aggregates memory across all connected workers</li>
+  <li><strong>Metadata server</strong>: Tracks which KV chunks exist and where they are stored</li>
+  <li><strong>RPC-based coordination</strong>: A master process coordinates chunk registration, lookup, and transfer</li>
+  <li><strong>Chunk-level storage</strong>: KV tensors are split into fixed-size chunks (we used 64 tokens per chunk) for granular caching</li>
+</ul>
+
+<h3 id="how-lmcache-integrates-with-mooncake">How LMCache Integrates with Mooncake</h3>
+
+<p><a href="https://github.com/LMCache/LMCache">LMCache</a> is the caching layer that bridges vLLM and Mooncake. The data flow:</p>
+
+<ol>
+  <li><strong>On prefill completion</strong>: LMCache stores computed KV chunks to Mooncake via <code class="language-plaintext highlighter-rouge">save_kv_layer</code> (Batch Put API)</li>
+  <li><strong>On new request</strong>: vLLM first checks local APC. For tokens not in local APC, LMCache checks Mooncake (Exist + Batch Get API)</li>
+  <li><strong>On cache hit</strong>: KV tensors are loaded from Mooncake directly into GPU memory, skipping prefill computation</li>
+</ol>
+
+<p>LMCache configuration for Mooncake:</p>
+
+<div class="language-yaml highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="na">local_cpu</span><span class="pi">:</span> <span class="s">False</span>
+<span class="na">remote_url</span><span class="pi">:</span> <span class="s2">"</span><span class="s">mooncakestore://&lt;master-ip&gt;:&lt;rpc-port&gt;/"</span>
+<span class="na">chunk_size</span><span class="pi">:</span> <span class="m">256</span> <span class="c1"># default: 256 tokens per chunk</span>
+<span class="na">global_segment_size</span><span class="pi">:</span> <span class="m">3355443200</span> <span class="c1"># default: ~3.125 GB per worker</span>
+<span class="na">protocol</span><span class="pi">:</span> <span class="s2">"</span><span class="s">tcp"</span> <span class="c1"># default: "tcp"</span>
+</code></pre></div></div>
+
+<p>Key parameters:</p>
+
+<ul>
+  <li><strong><code class="language-plaintext highlighter-rouge">remote_url</code></strong>: Address of the Mooncake master. The <code class="language-plaintext highlighter-rouge">mooncakestore://</code> scheme tells LMCache to use Mooncake as the distributed backend.</li>
+  <li><strong><code class="language-plaintext highlighter-rouge">chunk_size</code></strong>: Number of tokens per KV cache chunk. Smaller values allow finer-grained cache reuse — shorter prompts can be partially served from cache.</li>
+  <li><strong><code class="language-plaintext highlighter-rouge">global_segment_size</code></strong>: Amount of memory (in bytes) allocated per worker in the Mooncake pool.</li>
+  <li><strong><code class="language-plaintext highlighter-rouge">protocol</code></strong>: Transport protocol used for chunk transfer between workers (<code class="language-plaintext highlighter-rouge">tcp</code> or <code class="language-plaintext highlighter-rouge">rdma</code>).</li>
+</ul>
+
+<p><img src="/assets/img/blog_mooncacke_1.png" alt="Cross-Instance KV Cache Sharing architecture with LMCache + Mooncake. Orange path shows cold request flow (full prefill compute), blue dashed path shows cross-instance cache hit flow (KV fetched from Mooncake), and green path shows prefill-to-decode transfer via NixlConnector." />
+<em>Cross-Instance KV Cache Sharing architecture with LMCache + Mooncake. Orange path shows cold request flow (full prefill compute), blue dashed path shows cross-instance cache hit flow (KV fetched from Mooncake), and green path shows prefill-to-decode transfer via NixlConnector.</em></p>
+
+<h2 id="4-cache-aware-routing">4. Cache-Aware Routing</h2>
+
+<p>Cross-instance caching alone isn’t enough — <strong>routing strategy</strong> determines how often cache hits actually occur.</p>
+
+<h3 id="vllm-router">vllm-router</h3>
+
+<p><a href="https://github.com/vllm-project/router">vllm-router</a> is a lightweight, high-performance router built in Rust, developed by the vLLM team. It supports several routing policies:</p>
+
+<ul>
+  <li><strong>consistent_hash</strong>: Hashes the prompt and routes to a fixed instance. Same prompt always goes to the same instance → local APC handles it → Mooncake is never needed.</li>
+  <li><strong>round_robin</strong>: Distributes requests evenly. Same prompt goes to different instances → Mooncake helps as fallback.</li>
+  <li><strong>power_of_two</strong>: Randomly picks two candidate instances and routes to the one with the shorter queue — low overhead with good load distribution.</li>
+</ul>
+
+<p>vllm-router also natively supports P/D disaggregation, allowing explicit routing of prefill and decode requests to separate instance pools.</p>
+
+<p><strong>Pros</strong>: Extremely lightweight (Rust-based, minimal overhead), simple to deploy, native P/D disaggregation support, and benchmarks show 25% higher throughput than llm-d in certain workloads.</p>
+
+<p><strong>Cons</strong>: Routing decisions are stateless with respect to cache — <code class="language-plaintext highlighter-rouge">consistent_hash</code> maximizes local APC hits but can cause uneven load, while <code class="language-plaintext highlighter-rouge">round_robin</code> balances load but increases cross-instance misses. No real-time visibility into actual cache state across instances.</p>
+
+<h3 id="llm-d">llm-d</h3>
+
+<p><a href="https://github.com/llm-d/llm-d">llm-d</a> is a Kubernetes-native inference framework that implements <strong>precise prefix-cache aware scheduling</strong> via its External Processing Pod (EPP). vLLM pods publish cache block events (BlockStored, BlockRemoved) via ZMQ, which llm-d aggregates into a global, near-real-time <code class="language-plaintext highlighter-rouge">kvblock.Index</code>. The EPP’s <code class="language-plaintext highlighter-rouge">prefix-cache-scorer</code> queries this index on every incoming request to route to the instance most likely to have a cache hit:</p>
+
+<div class="language-yaml highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># Example: llm-d's Endpoint Picker configuration</span>
+<span class="na">schedulingProfiles</span><span class="pi">:</span>
+  <span class="pi">-</span> <span class="na">name</span><span class="pi">:</span> <span class="s">prefill</span>
+    <span class="na">plugins</span><span class="pi">:</span>
+      <span class="pi">-</span> <span class="na">pluginRef</span><span class="pi">:</span> <span class="s">queue-scorer</span> <span class="c1"># prefer instances with shorter queues</span>
+        <span class="na">weight</span><span class="pi">:</span> <span class="m">1.0</span>
+      <span class="pi">-</span> <span class="na">pluginRef</span><span class="pi">:</span> <span class="s">prefix-cache-scorer</span> <span class="c1"># prefer instances with actual cached blocks</span>
+        <span class="na">weight</span><span class="pi">:</span> <span class="m">1.0</span>
+</code></pre></div></div>
+
+<p><strong>Pros</strong>: Makes routing decisions based on actual real-time cache state across the cluster, not just heuristics. Particularly effective for workloads with shared long prefixes (e.g., RAG, multi-turn conversations). Maximizes local APC hit rate, reducing the need for cross-instance Mooncake fallback.</p>
+
+<p><strong>Cons</strong>: More complex to operate (requires ZMQ event pipeline, in-memory index, Kubernetes-native deployment). Adds scheduling overhead — benchmarks show higher TTFT than vllm-router in some configurations due to the scoring computation.</p>
+
+<h3 id="comparison">Comparison</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th> </th>
+      <th><strong>vllm-router</strong></th>
+      <th><strong>llm-d</strong></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Cache awareness</td>
+      <td>Heuristic (hash/queue-based)</td>
+      <td>Precise (real-time block index)</td>
+    </tr>
+    <tr>
+      <td>Deployment</td>
+      <td>Lightweight, any environment</td>
+      <td>Kubernetes-native</td>
+    </tr>
+    <tr>
+      <td>P/D disaggregation</td>
+      <td>Native support</td>
+      <td>Supported</td>
+    </tr>
+    <tr>
+      <td>Operational complexity</td>
+      <td>Low</td>
+      <td>High</td>
+    </tr>
+    <tr>
+      <td>Best for</td>
+      <td>General serving, high throughput</td>
+      <td>Workloads with shared long prefixes</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The ideal architecture combines cache-aware routing (to maximize local APC hits) with cross-instance sharing via Mooncake (as a fallback when requests inevitably land on non-optimal instances).</p>
+
+<h2 id="5-related-work">5. Related Work</h2>
+
+<h3 id="lmcache--mooncake-tencent--lmcache-team">LMCache + Mooncake (Tencent / LMCache Team)</h3>
+
+<p>The <a href="https://blog.lmcache.ai/2025-05-08-mooncake/">LMCache team’s blog</a> describes integrating Mooncake as a distributed backend for cross-process KV sharing. Their setup demonstrated KV cache sharing across multiple vLLM instances, validating the architecture we adopted.</p>
+
+<h3 id="llm-d-disaggregated-pd-with-kv-cache-sharing">llm-d Disaggregated PD with KV Cache Sharing</h3>
+
+<p>The <a href="https://llm-d.ai/blog/kvcache-wins-you-can-see">llm-d KV Cache blog</a> demonstrates significant latency improvements through cache-aware scheduling in disaggregated prefill-decode setups. Their EPP router with prefix-cache-scorer achieves high cache hit rates by intelligently routing requests to cache-warm instances.</p>
+
+<h3 id="vllm-production-stack">vLLM Production Stack</h3>
+
+<p>The <a href="https://docs.vllm.ai/projects/production-stack/en/latest/use_cases/sharing-kv-cache.html">vLLM Production Stack</a> documents KV cache sharing across vLLM instances using LMCache with various backends (Redis, Mooncake, etc.), providing the foundational architecture patterns.</p>
+
+<h3 id="key-insight-from-related-work">Key Insight from Related Work</h3>
+
+<p>A common finding across all implementations: <strong>local GPU APC is always checked first</strong> in vLLM V1. The cache hierarchy is strict — GPU HBM → CPU DRAM → External (Mooncake). This means cross-instance sharing only activates when local APC cannot serve the request, making it a complement to (not replacement for) local caching.</p>
+
+<h2 id="6-benchmark-measuring-the-impact">6. Benchmark: Measuring the Impact</h2>
+
+<h3 id="test-design">Test Design</h3>
+
+<p>We designed a controlled benchmark that isolates each caching layer’s contribution. Using long system prompts (~3,000 words / ~4,000+ tokens), we sent requests directly to specific prefill instances, bypassing the router:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Scenario</th>
+      <th>Description</th>
+      <th>What’s Tested</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Cold</td>
+      <td>First request, no cache anywhere</td>
+      <td>Baseline prefill cost</td>
+    </tr>
+    <tr>
+      <td>Same-instance (APC)</td>
+      <td>Repeat to same instance</td>
+      <td>Local GPU cache</td>
+    </tr>
+    <tr>
+      <td>Cross + Mooncake</td>
+      <td>Same prompt to different instance</td>
+      <td>Distributed cache</td>
+    </tr>
+    <tr>
+      <td>Cross - No cache</td>
+      <td>Unique prompt to different instance</td>
+      <td>Full recompute (control)</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="results">Results</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Scenario</th>
+      <th>Avg TTFT</th>
+      <th>Speedup vs Cold</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Cold (no cache)</strong></td>
+      <td>0.808s</td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><strong>Same-instance (local APC)</strong></td>
+      <td>0.330s</td>
+      <td><strong>2.45x</strong></td>
+    </tr>
+    <tr>
+      <td><strong>Cross-instance + Mooncake (same node)</strong></td>
+      <td>0.605s</td>
+      <td><strong>1.34x</strong></td>
+    </tr>
+    <tr>
+      <td><strong>Cross-instance + Mooncake (different node)</strong></td>
+      <td>0.599s</td>
+      <td><strong>1.35x</strong></td>
+    </tr>
+    <tr>
+      <td><strong>Cross-instance - no cache</strong></td>
+      <td>0.789s</td>
+      <td>1.02x</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="key-takeaways">Key Takeaways</h3>
+
+<p><strong>Mooncake delivers 24% TTFT reduction</strong> in cross-instance scenarios (0.789s → 0.605s). When a prompt lands on an instance without local cache, Mooncake fetches pre-computed KV tensors instead of recomputing, saving ~0.19s per request.</p>
+
+<p><strong>Same-node vs different-node: negligible difference</strong> (0.605s vs 0.599s). Even over TCP, cross-node Mooncake transfer is fast enough. This suggests the bottleneck is not network transfer but rather the overhead of chunk lookup and GPU memory operations. Mooncake also supports RDMA by setting <code class="language-plaintext highlighter-rouge">protocol: "rdma"</code> in the LMCache config (requires RDMA-capable NICs and a compatible Mooncake build), though given the bottleneck is not network-bound, the practical benefit is likely limited except at very high request rates or large chunk sizes.</p>
+
+<p><strong>Local APC is still significantly faster</strong> (0.330s vs 0.605s). Mooncake adds ~84% overhead compared to local APC, making cache-aware routing critical for maximizing local hits. Mooncake serves as a fallback for requests that inevitably miss local cache.</p>
+
+<p><strong>Mooncake metrics confirmed actual cross-instance transfer</strong>:</p>
+
+<ul>
+  <li>Batch Put: +12 requests, +110 items (KV chunks stored to pool)</li>
+  <li>Batch Get: +12 requests, +156 items (KV chunks fetched cross-instance)</li>
+  <li>Memory pool grew by 660 MB during the test</li>
+</ul>
+
+<h2 id="7-conclusion">7. Conclusion</h2>
+
+<p>Cross-instance KV cache sharing with Mooncake + LMCache fills an important gap in multi-instance LLM serving. While local APC handles the common case efficiently, the 24% TTFT improvement in cross-instance scenarios translates to meaningful latency savings at scale — especially as the number of prefill instances grows and per-instance cache hit rates naturally decline.</p>
+
+<p>The optimal setup combines three layers:</p>
+
+<ol>
+  <li><strong>Local APC</strong> for same-instance cache hits (fastest)</li>
+  <li><strong>Cache-aware routing</strong> (e.g., prefix-cache-scorer) to maximize local hits</li>
+  <li><strong>Distributed KV cache</strong> (Mooncake) as a fallback for cross-instance misses</li>
+</ol>
+
+<p>For production deployments, we recommend starting with cache-aware routing to maximize local APC utilization, then adding Mooncake for the remaining cross-instance misses. The benefit scales with the diversity of prompts and the number of instances — workloads with many shared long prefixes (e.g., RAG with common document contexts) will see the greatest impact.</p>
+
+    </div>
+    
+    <footer class="post-footer">
+      
+      <a class="tag" href="#">["gpu",</a><a class="tag" href="#">"vllm",</a><a class="tag" href="#">"llm",</a><a class="tag" href="#">"inference",</a><a class="tag" href="#">"rdma",</a><a class="tag" href="#">"networking"]</a>
+    </footer>
+    
+  </div>
+</article>
+</main>
+  <footer class="site-foot">
+    <div class="foot-wrap">© Lucas Nam — all opinions my own.</div>
+  </footer>
+  <script src="/assets/js/toc.js"></script>
+</body>
+</html>

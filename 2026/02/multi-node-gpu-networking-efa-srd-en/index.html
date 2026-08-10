@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // apply saved theme before paint to avoid flash
+    (function(){ var t='light'; try{ t=localStorage.getItem('theme')||'light'; }catch(e){} document.documentElement.setAttribute('data-theme', t); })();
+  </script>
+  <title>Multi-Node P/D Disagg vLLM Serving: How EFA Works Compared to InfiniBand? · Lucas Nam</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,380;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+  <header class="site-head">
+    <div class="head-wrap">
+      <a class="brand" href="/">
+        <span class="brand-name">Lucas Nam</span>
+        <span class="brand-tag">engineering notes</span>
+      </a>
+      <nav class="site-nav">
+        <a href="/">About</a>
+        <a href="/blog/">Blog</a>
+        <a href="/publications/">Publications</a>
+        <a href="https://x.com/lucas_nam96">X</a>
+        <a href="https://www.linkedin.com/in/lucas-sangdae-nam-635a36193/">LinkedIn</a>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle light/dark theme">
+          <span class="icon-light">☀</span><span class="icon-dark">☾</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+  <main><article class="post">
+  <aside class="post-toc" aria-label="Table of contents">
+    <div class="toc-inner">
+      <p class="toc-head">Contents</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+  <div class="post-main">
+    <header class="post-header">
+      <p class="eyebrow">infrastructure</p>
+      <h1 class="post-title">Multi-Node P/D Disagg vLLM Serving: How EFA Works Compared to InfiniBand?</h1>
+      <p class="post-meta">
+        <span>Lucas Nam</span>
+        <span>February 22, 2026</span>
+        <span>8 min read</span>
+      </p>
+      <p class="post-lede">Multi-node GPU communication on AWS EFA, InfiniBand vs EFA comparison, and vLLM P/D Disagg setup</p>
+    </header>
+    <div class="post-content">
+      <h2 id="1-multi-node-gpu-requirements">1. Multi-Node GPU Requirements</h2>
+
+<p>When GPUs communicate within a single node, NVLink provides hundreds of GB/s of bandwidth. NVLink enables direct point-to-point connections between GPUs, allowing them to communicate without going through the CPU.</p>
+
+<p>The problem arises when you go multi-node — the bottleneck shifts to the inter-node network. This is especially critical for AllReduce in Tensor Parallelism during LLM serving and KV cache transfer in Disaggregated Serving (Prefill/Decode separation). Naturally, TCP/IP can’t meet these demands.</p>
+
+<h3 id="the-limitations-of-tcpip">The Limitations of TCP/IP</h3>
+
+<p>TCP requires every packet to traverse the kernel network stack. This triggers a chain of system calls, context switches, protocol processing, and buffer copies, making it extremely slow. Unnecessary memcopy operations also occur in the process.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>TCP/IP Path (Traditional):
+GPU → cudaMemcpy → CPU RAM → send() → Kernel → NIC
+  → Network →
+NIC → Kernel → recv() → CPU RAM → cudaMemcpy → GPU
+
+RDMA + GPUDirect Path:
+GPU HBM → NIC (Direct DMA from GPU memory)
+  → Network →
+NIC → GPU HBM (Direct DMA)
+</code></pre></div></div>
+
+<p>RDMA (Remote Direct Memory Access) bypasses the CPU and kernel, allowing the NIC to directly access memory. OS Bypass eliminates system call and context switch overhead. GPUDirect RDMA takes this a step further by enabling the NIC to perform DMA directly to GPU memory (HBM).</p>
+
+<h3 id="infiniband">InfiniBand</h3>
+
+<p>InfiniBand is what made GPUDirect RDMA possible. With each generation — HDR (A100 standard) and NDR (H100 standard) — per-port bandwidth roughly doubles (200Gbps → 400Gbps).</p>
+
+<hr />
+
+<h2 id="2-efa-and-srd">2. EFA and SRD</h2>
+
+<h3 id="efa-elastic-fabric-adapter">EFA (Elastic Fabric Adapter)</h3>
+
+<p>EFA (Elastic Fabric Adapter) is a high-performance network interface designed by AWS — think of it as something similar to InfiniBand. It’s available on specific instance types (p4d, p5, p6, etc.) and provides the OS bypass and RDMA capabilities described above.</p>
+
+<h3 id="ethernet-vs-infiniband">Ethernet vs InfiniBand</h3>
+
+<p>The biggest difference with EFA is that it operates on standard Ethernet fabric. InfiniBand is a single-vendor ecosystem from NVIDIA (Mellanox) — switches, NICs, and cables all need to be Mellanox products, with virtually no alternatives. Ethernet equipment, on the other hand, is available from multiple vendors like Broadcom and Intel, making it commodity hardware.</p>
+
+<h3 id="rdma-transport-modes">RDMA Transport Modes</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Mode</th>
+      <th>Dedicated Connection</th>
+      <th>Delivery Guarantee</th>
+      <th>Order Guarantee</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>RC</strong> (Reliable Connection)</td>
+      <td>Required (dedicated QP per peer)</td>
+      <td>O</td>
+      <td>O</td>
+      <td>Default InfiniBand transport</td>
+    </tr>
+    <tr>
+      <td><strong>UD</strong> (Unreliable Datagram)</td>
+      <td>Not required (single QP)</td>
+      <td>X</td>
+      <td>X</td>
+      <td>Lightest weight</td>
+    </tr>
+    <tr>
+      <td><strong>RD</strong> (Reliable Datagram)</td>
+      <td>Not required (single QP)</td>
+      <td>O</td>
+      <td>O</td>
+      <td>Theoretically ideal but unimplemented</td>
+    </tr>
+    <tr>
+      <td><strong>SRD</strong> (Scalable Reliable Datagram)</td>
+      <td>Not required</td>
+      <td>O</td>
+      <td>X (SW reordering)</td>
+      <td>Designed by AWS</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>RC (Reliable Connection):
+Server A ──dedicated link──→ Server B
+Server A ──dedicated link──→ Server C
+→ Requires a dedicated QP (Queue Pair) per peer
+
+UD (Unreliable Datagram):
+Server A ──link──→ can send to anyone
+→ No dedicated link needed, one QP for all peers
+
+RD (Reliable Datagram):
+Server A ──link──→ can send to anyone
+→ No dedicated link + delivery guarantee + order guarantee
+</code></pre></div></div>
+
+<h3 id="why-rd-is-not-actually-used">Why RD Is Not Actually Used</h3>
+
+<p>In practice, InfiniBand doesn’t really use RD. The reason comes down to hardware implementation complexity.</p>
+
+<ul>
+  <li><strong>RC</strong> only needs to track state for one peer per QP, and <strong>UD</strong> doesn’t need state tracking at all since it’s fire-and-forget.</li>
+  <li>But with <strong>RD</strong>, the NIC must track state for every communication peer:
+    <ul>
+      <li>“Sent up to packet 3 to Server B, received ACK up to 2”</li>
+      <li>“Sent up to packet 7 to Server C, received ACK up to 5”</li>
+      <li>“Sent packet 1 to Server D, no ACK yet”</li>
+      <li>“Sent up to packet 12 to Server E, received ACK up to 10”</li>
+      <li>… × every communication peer</li>
+    </ul>
+  </li>
+  <li>For example, if a single QP communicates with 1,000 servers, the NIC must manage 1,000 states. These need to be stored in the NIC chip’s SRAM, which is expensive and small.</li>
+  <li>So from NVIDIA’s perspective, RC and UD were sufficient, there was no demand for RD, and the cost-benefit didn’t make sense — so it was deprecated.</li>
+</ul>
+
+<h3 id="srd-scalable-reliable-datagram">SRD (Scalable Reliable Datagram)</h3>
+
+<p>So what’s different about AWS’s SRD? <strong>It gives up the ordering guarantee from RD.</strong></p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>RD:   Packet 1 → Packet 2 → Packet 3  (must arrive in order)
+      Path: A ━━━━━━━━━━━━━→ B  (single path)
+
+SRD:  Packet 1 ──Path A──→ ┐
+      Packet 2 ──Path B──→ ├→ Software reorders after arrival
+      Packet 3 ──Path C──→ ┘
+</code></pre></div></div>
+
+<p>By giving up ordering, packets can be sprayed across multiple paths. If one path is congested, packets can take another — this is advantageous in Ethernet environments. In environments where thousands of servers share the network, SRD provides stability, which is why it was adopted.</p>
+
+<hr />
+
+<h2 id="3-efa--gpudirect-rdma">3. EFA → GPUDirect RDMA</h2>
+
+<p>When using EFA, the GPUDirect RDMA flow looks like this:</p>
+
+<p><img src="/assets/img/efa_blog_1.png" alt="EFA GPUDirect RDMA Flow" />
+<em>EFA GPUDirect RDMA Flow</em></p>
+
+<p>Of course, intra-node GPU communication still uses NVLink.</p>
+
+<h3 id="infiniband-vs-efa-performance-comparison">InfiniBand vs EFA Performance Comparison</h3>
+
+<p>So does EFA actually deliver comparable performance to InfiniBand? Here’s a summary of benchmark comparisons:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Metric</th>
+      <th>InfiniBand</th>
+      <th>EFA/Ethernet</th>
+      <th>Conclusion</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Small message latency</strong></td>
+      <td>~1 µs</td>
+      <td>~10 µs</td>
+      <td>IB dominant</td>
+    </tr>
+    <tr>
+      <td><strong>Large transfer bandwidth</strong></td>
+      <td>~200 Gbps</td>
+      <td>~200 Gbps</td>
+      <td>Similar</td>
+    </tr>
+    <tr>
+      <td><strong>AI Training (large-scale)</strong></td>
+      <td>Baseline</td>
+      <td>Similar with proper tuning</td>
+      <td>Minimal gap</td>
+    </tr>
+    <tr>
+      <td><strong>AI Inference (Decode)</strong></td>
+      <td>Favorable</td>
+      <td>Avg 1.0166% slower</td>
+      <td>IB slightly better</td>
+    </tr>
+    <tr>
+      <td><strong>Cost</strong></td>
+      <td>1.5–2.5x more expensive</td>
+      <td>Baseline</td>
+      <td>Ethernet wins</td>
+    </tr>
+  </tbody>
+</table>
+
+<blockquote>
+  <p>Sources: <a href="https://www.wwt.com/blog/the-battle-of-ai-networking-ethernet-vs-infiniband">WWT - The Battle of AI Networking</a>, <a href="https://www.vitextech.com/blogs/blog/infiniband-vs-ethernet-for-ai-clusters-effective-gpu-networks-in-2025">Vitex Tech - InfiniBand vs Ethernet</a></p>
+</blockquote>
+
+<p>Overall, InfiniBand appears to have better raw performance. However, if you already have your setup on AWS, EFA can be advantageous. That said, considering that recent neo-cloud GPU pricing is significantly cheaper compared to AWS, InfiniBand might be the better choice.</p>
+
+<hr />
+
+<h2 id="4-pd-disagg-vllm-serving-on-efa">4. P/D Disagg vLLM Serving on EFA</h2>
+
+<p>In my case, I was working on setting up Prefill/Decode Disagg in an A100 environment. In this scenario, EFA is directly involved in the kv_transfer stage.</p>
+
+<h3 id="kv-cache-transfer-software-stack">KV Cache Transfer Software Stack</h3>
+
+<p><img src="/assets/img/efa_blog_2.png" alt="KV Cache Transfer Software Stack on EFA" />
+<em>KV Cache Transfer Software Stack on EFA</em></p>
+
+<p>Let’s look at each component above EFA in detail.</p>
+
+<h3 id="nixl-nvidia-inference-xfer-library">NIXL (NVIDIA Inference Xfer Library)</h3>
+
+<p>NIXL is a dedicated library for GPU-to-GPU memory transfer. The existing NCCL is optimized for collective communication like AllReduce and All-to-All, but it’s not well-suited for point-to-point transfers of memory blocks from one specific GPU to another — that’s why NIXL was created.</p>
+
+<p>It’s used in P/D Disagg for the <code class="language-plaintext highlighter-rouge">Prefill GPU ──RDMA Write──▶ Decode GPU</code> process, and for migration between Decode instances: <code class="language-plaintext highlighter-rouge">Decode GPU (Server A, overloaded) ──RDMA──▶ Decode GPU (Server B, available)</code>.</p>
+
+<p>NIXL includes a NIXL Agent that handles memory registration, metadata management (GPU memory addresses, RDMA keys, NIC addresses, etc.), and plugin backends (UCX, libfabric) that perform the actual transfers.</p>
+
+<h3 id="ucx-unified-communication-x">UCX (Unified Communication X)</h3>
+
+<p>UCX is a general-purpose communication framework originally built for InfiniBand. It internally supports protocols including RC, UD, TCP, cuda_ipc (for GPUs on the same node), and cuda_copy (GPU ↔ CPU copy).</p>
+
+<p>On EFA, you can use UCX by setting <code class="language-plaintext highlighter-rouge">UCX_TLS=ib</code>, since EFA provides an ibverbs-compatible interface.</p>
+
+<ul>
+  <li><a href="https://github.com/amzn/amzn-drivers/blob/master/kernel/linux/efa/src/efa_verbs.c">EFA ibverbs implementation (AWS driver)</a></li>
+  <li><a href="https://github.com/linux-rdma/rdma-core/blob/master/providers/efa/efa.c">rdma-core EFA provider</a></li>
+</ul>
+
+<h3 id="libfabric-open-fabrics-interface">libfabric (Open Fabrics Interface)</h3>
+
+<p>libfabric is the standard abstraction layer for network hardware vendors. It’s composed internally of providers including EFA provider, TCP provider, and SHM provider.</p>
+
+<p>Officially, libfabric appears to be the recommended path, but in practice UCX had better dependency compatibility. With libfabric, I kept running into GPU memory bad address issues, so I ended up deprecating it for my use case.</p>
+
+<h3 id="aws-ofi-nccl-optional">aws-ofi-nccl (optional)</h3>
+
+<p>Since my setup was P/D Disagg, I didn’t need NCCL. However, if your model is large enough to require multi-node setup, or for multi-node training, NCCL is necessary — and in EFA environments, aws-ofi-nccl is required.</p>
+
+<p>NCCL was originally designed for InfiniBand and has a built-in <code class="language-plaintext highlighter-rouge">net_ib</code> transport that directly calls IB Verbs APIs. aws-ofi-nccl implements NCCL’s network plugin API and translates it to libfabric’s RDM interface.</p>
+
+<h3 id="efa-nv-peermem">efa-nv-peermem</h3>
+
+<p>This is a kernel module that enables the NIC to directly access GPU memory. The standard version is nvidia-peermem, but for EFA, efa-nv-peermem is used instead.</p>
+
+<p>By default, NICs can only read CPU memory. efa-nv-peermem bridges the GPU and NIC, enabling direct access. (It’s a GPUDirect RDMA module.)</p>
+
+    </div>
+    
+    <footer class="post-footer">
+      
+      <a class="tag" href="#">["gpu",</a><a class="tag" href="#">"networking",</a><a class="tag" href="#">"efa",</a><a class="tag" href="#">"infiniband",</a><a class="tag" href="#">"rdma",</a><a class="tag" href="#">"vllm"]</a>
+    </footer>
+    
+  </div>
+</article>
+</main>
+  <footer class="site-foot">
+    <div class="foot-wrap">© Lucas Nam — all opinions my own.</div>
+  </footer>
+  <script src="/assets/js/toc.js"></script>
+</body>
+</html>

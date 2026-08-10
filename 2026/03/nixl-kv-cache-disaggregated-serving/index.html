@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // apply saved theme before paint to avoid flash
+    (function(){ var t='light'; try{ t=localStorage.getItem('theme')||'light'; }catch(e){} document.documentElement.setAttribute('data-theme', t); })();
+  </script>
+  <title>NIXL for KV Cache in Disaggregated Serving · Lucas Nam</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,380;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+  <header class="site-head">
+    <div class="head-wrap">
+      <a class="brand" href="/">
+        <span class="brand-name">Lucas Nam</span>
+        <span class="brand-tag">engineering notes</span>
+      </a>
+      <nav class="site-nav">
+        <a href="/">About</a>
+        <a href="/blog/">Blog</a>
+        <a href="/publications/">Publications</a>
+        <a href="https://x.com/lucas_nam96">X</a>
+        <a href="https://www.linkedin.com/in/lucas-sangdae-nam-635a36193/">LinkedIn</a>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle light/dark theme">
+          <span class="icon-light">☀</span><span class="icon-dark">☾</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+  <main><article class="post">
+  <aside class="post-toc" aria-label="Table of contents">
+    <div class="toc-inner">
+      <p class="toc-head">Contents</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+  <div class="post-main">
+    <header class="post-header">
+      <p class="eyebrow">infrastructure</p>
+      <h1 class="post-title">NIXL for KV Cache in Disaggregated Serving</h1>
+      <p class="post-meta">
+        <span>Lucas Nam</span>
+        <span>March 4, 2026</span>
+        <span>13 min read</span>
+      </p>
+      <p class="post-lede">How NIXL accelerates KV Cache transfer in Prefill/Decode disaggregated LLM serving, its architecture, vLLM integration, and a real-world memory leak debugging story</p>
+    </header>
+    <div class="post-content">
+      <h2 id="1-kv-cache-in-disaggregated-serving">1. KV Cache in Disaggregated Serving</h2>
+
+<p>In Prefill/Decode (P/D) disaggregated serving, the speed of KV Cache transfer from Prefill to Decode is critical. The per-token KV Cache size is calculated as:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Per-token KV Cache = num_layers × 2 (K, V) × num_kv_heads × head_dim × dtype_size
+</code></pre></div></div>
+
+<p>For <strong>Llama-3.1-70B</strong> with BF16:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Parameter</th>
+      <th>Value</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Layers</td>
+      <td>80</td>
+      <td>Transformer blocks</td>
+    </tr>
+    <tr>
+      <td>× 2</td>
+      <td>K and V</td>
+      <td>Each layer stores both Key and Value vectors</td>
+    </tr>
+    <tr>
+      <td>KV Heads</td>
+      <td>8</td>
+      <td>GQA (Grouped Query Attention)</td>
+    </tr>
+    <tr>
+      <td>Head Dim</td>
+      <td>128</td>
+      <td>Vector size per head</td>
+    </tr>
+    <tr>
+      <td>dtype size</td>
+      <td>2 bytes</td>
+      <td>BF16 precision</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Per token = 80 × 2 × 8 × 128 × 2 = 327,680 bytes ≈ 320 KB
+</code></pre></div></div>
+
+<p>That’s <strong>320 KB per token</strong>, multiplied by the prompt length:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: center">Prompt Length</th>
+      <th style="text-align: center">KV Cache Size</th>
+      <th style="text-align: center">IB HDR × 1 (200 Gbps, ~25 GB/s)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: center">1K tokens</td>
+      <td style="text-align: center">0.32 GB</td>
+      <td style="text-align: center">~13 ms</td>
+    </tr>
+    <tr>
+      <td style="text-align: center">4K tokens</td>
+      <td style="text-align: center">1.28 GB</td>
+      <td style="text-align: center">~51 ms</td>
+    </tr>
+    <tr>
+      <td style="text-align: center">8K tokens</td>
+      <td style="text-align: center">2.56 GB</td>
+      <td style="text-align: center">~102 ms</td>
+    </tr>
+    <tr>
+      <td style="text-align: center">32K tokens</td>
+      <td style="text-align: center">10.24 GB</td>
+      <td style="text-align: center">~410 ms</td>
+    </tr>
+    <tr>
+      <td style="text-align: center">128K tokens</td>
+      <td style="text-align: center">40.96 GB</td>
+      <td style="text-align: center">~1,638 ms</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>These numbers make it clear: KV Cache transfer speed directly impacts P/D disaggregated serving latency. Several factors make this transfer challenging:</p>
+
+<ul>
+  <li><strong>GPU-to-GPU memory</strong>: Direct transfer without CPU involvement (GPUDirect RDMA)</li>
+  <li><strong>Non-contiguous memory</strong>: PagedAttention scatters KV Cache across non-contiguous blocks</li>
+  <li><strong>Asynchronous execution</strong>: GPUs must continue processing other requests during transfer</li>
+  <li><strong>Heterogeneous paths</strong>: NVLink, InfiniBand, RoCE, EFA, TCP — the optimal path varies by environment</li>
+  <li><strong>Memory registration</strong>: RDMA requires registering memory with the NIC before transfer, which is expensive</li>
+</ul>
+
+<p>This is exactly what <strong>NIXL</strong> (NVIDIA Inference Xfer Library) is designed to solve — a library for accelerating data transfer in disaggregated serving. It is open-sourced at the <code class="language-plaintext highlighter-rouge">ai-dynamo/nixl</code> repository. (Note: NCCL is for collective operations like AllReduce and AllGather; NIXL is specifically for point-to-point data movement in serving.)</p>
+
+<hr />
+
+<h2 id="2-nixl-architecture-overview">2. NIXL Architecture Overview</h2>
+
+<p><img src="/assets/img/blog_nixl_1.png" alt="NIXL Architecture — from inference frameworks down to hardware transport layers." />
+<em>NIXL Architecture — from inference frameworks down to hardware transport layers.</em></p>
+
+<p>NIXL’s <strong>Transfer Agent</strong> abstracts three core entities:</p>
+
+<h3 id="21-memory-section">2.1 Memory Section</h3>
+
+<p>Memory Section provides a unified abstraction over diverse memory and storage types. HBM (GPU), DRAM (CPU), NVMe SSD, file systems, and object storage are all handled through the same interface.</p>
+
+<h3 id="22-transfer-backend-interface">2.2 Transfer Backend Interface</h3>
+
+<p>The Transfer Backend Interface abstracts different transport backends from the Agent and selects the most optimal one for each transfer. For example:</p>
+<ul>
+  <li>Source is DRAM, destination is VRAM → select <strong>UCX</strong></li>
+  <li>VRAM to parallel file system → select <strong>GPUDirect Storage</strong></li>
+</ul>
+
+<p><img src="/assets/img/blog_nixl_2.png" alt="NIXL Backend Selection Flow — from memory type identification to final backend selection." />
+<em>NIXL Backend Selection Flow — from memory type identification to final backend selection.</em></p>
+
+<p>When a user does not explicitly specify a backend, NIXL’s selection engine follows a 4-step process:</p>
+<ol>
+  <li><strong>Identify memory types</strong> from local and remote descriptors (e.g., VRAM)</li>
+  <li><strong>Find common backend engines</strong> — intersection of local and remote agent’s initialized backends</li>
+  <li><strong>Verify memory registration</strong> — check if src/dst addresses fall within each candidate’s registered ranges</li>
+  <li><strong>Final selection</strong> — usually only one backend qualifies; if multiple, use preference list</li>
+</ol>
+
+<h3 id="23-metadata-handler">2.3 Metadata Handler</h3>
+
+<p>The Metadata Handler encapsulates the information needed for data transfer between NIXL Agents running on different workers. It exchanges this information via side channels (HTTP, ZeroMQ, TCP) or centralized metadata services (etcd, Redis).</p>
+
+<hr />
+
+<h2 id="3-nixl-internals">3. NIXL Internals</h2>
+
+<h3 id="31-transfer-agent">3.1 Transfer Agent</h3>
+
+<p>A Transfer Agent is the core runtime entity of NIXL. Each Agent is identified by a unique name (e.g., <code class="language-plaintext highlighter-rouge">"prefill_worker_0"</code>). A single Agent can manage multiple GPUs, and in vLLM’s case, one Agent is created per TP (Tensor Parallelism) worker.</p>
+
+<p>An Agent manages:</p>
+<ul>
+  <li><strong>Local memory sections</strong>: Registered VRAM/DRAM/SSD address ranges and per-backend registration state</li>
+  <li><strong>Backend engine instances</strong>: Initialized plugins (UCX, GDS, libfabric, etc.) with their connection info</li>
+  <li><strong>Remote agent metadata cache</strong>: Connection info and memory layout received via <code class="language-plaintext highlighter-rouge">load_remote_md()</code> — required before sending transfers to a remote Agent</li>
+  <li><strong>In-flight transfer requests</strong>: Status tracking (IN_PROGRESS, DONE, ERROR) of active handles</li>
+</ul>
+
+<h3 id="32-memory-section-and-descriptors">3.2 Memory Section and Descriptors</h3>
+
+<p>A <strong>Memory Section</strong> is a collection of memory registered with a NIXL Agent. Each segment is a <code class="language-plaintext highlighter-rouge">(address, length, device_id)</code> tuple.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Memory Type</th>
+      <th>address</th>
+      <th>device_id</th>
+      <th>Use Case</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>VRAM</td>
+      <td>GPU virtual addr</td>
+      <td>GPU index</td>
+      <td>KV Cache blocks</td>
+    </tr>
+    <tr>
+      <td>DRAM</td>
+      <td>CPU virtual addr</td>
+      <td>NUMA node</td>
+      <td>CPU offload buffer</td>
+    </tr>
+    <tr>
+      <td>NVMe</td>
+      <td>file offset</td>
+      <td>disk index</td>
+      <td>SSD checkpoint</td>
+    </tr>
+    <tr>
+      <td>Object Store</td>
+      <td>bucket/key</td>
+      <td>S3 endpoint</td>
+      <td>Object storage</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>A <strong>Descriptor List</strong> is the basic unit of transfer requests, coming in two varieties:</p>
+<ul>
+  <li><strong>Registration descriptor</strong>: <code class="language-plaintext highlighter-rouge">(addr, len, devID, optional_str)</code></li>
+  <li><strong>Transfer descriptor</strong>: <code class="language-plaintext highlighter-rouge">(addr, len, devID, backend_metadata)</code></li>
+</ul>
+
+<p>Importantly, descriptors within a single Descriptor List <strong>can span different GPUs</strong>. A single transfer request can include 3 blocks from GPU 0 + 2 blocks from GPU 1, and NIXL processes them in parallel.</p>
+
+<h3 id="33-backend-plugin-south-bound-api">3.3 Backend Plugin (South Bound API)</h3>
+
+<p>NIXL’s backend plugins implement the South Bound API (SB API), and each plugin is loaded on demand.</p>
+
+<p>Currently supported backends (NIXL 0.8.0):</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Backend</th>
+      <th>Transport Path</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>UCX</td>
+      <td>RDMA, NVLink, TCP</td>
+    </tr>
+    <tr>
+      <td>GPUNetIO (DOCA)</td>
+      <td>GDAKI, CPU bypass</td>
+    </tr>
+    <tr>
+      <td>Libfabric</td>
+      <td>EFA, CXI, SRD</td>
+    </tr>
+    <tr>
+      <td>GDS / GDS_MT</td>
+      <td>GPUDirect Storage</td>
+    </tr>
+    <tr>
+      <td>POSIX</td>
+      <td>AIO, io_uring</td>
+    </tr>
+    <tr>
+      <td>OBJ</td>
+      <td>S3 API</td>
+    </tr>
+    <tr>
+      <td>Mooncake</td>
+      <td>Third-party transfer engine</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Each plugin implements these core SB API functions:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>initBackend()      — Initialize backend, establish connections
+registerMem()      — Register memory regions (e.g., RDMA MR registration)
+deregisterMem()    — Deregister memory
+prepXferReq()      — Prepare transfer request (resource allocation)
+postXferReq()      — Start transfer (async)
+checkXferReq()     — Check transfer status
+releaseXferReq()   — Release transfer handle
+</code></pre></div></div>
+
+<h3 id="34-north-bound-api-user-interface">3.4 North Bound API (User Interface)</h3>
+
+<p>The North Bound API is what inference frameworks (vLLM, etc.) use. It follows a 5-phase lifecycle:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># ─── Phase 1: Backend Initialization ───
+</span><span class="n">agent</span> <span class="o">=</span> <span class="nc">NixlAgent</span><span class="p">(</span><span class="sh">"</span><span class="s">prefill_worker_0</span><span class="sh">"</span><span class="p">,</span> <span class="n">backends</span><span class="o">=</span><span class="p">[</span><span class="sh">"</span><span class="s">UCX</span><span class="sh">"</span><span class="p">])</span>
+
+<span class="c1"># ─── Phase 2: Memory Registration ───
+# Internally performs RDMA Memory Region registration (pin + physical address mapping).
+# Called once at server startup; no need to re-register per transfer.
+</span><span class="n">reg_desc</span> <span class="o">=</span> <span class="n">agent</span><span class="p">.</span><span class="nf">register_memory</span><span class="p">(</span><span class="n">memory_section</span><span class="p">)</span>
+
+<span class="c1"># ─── Phase 3: Metadata Exchange ───
+# Serialize local Agent's connection info + registered memory info.
+# Send this byte string to the remote Agent via side channel (HTTP, etcd, etc.).
+</span><span class="n">local_md</span> <span class="o">=</span> <span class="n">agent</span><span class="p">.</span><span class="nf">get_local_md</span><span class="p">()</span>        <span class="c1"># Serialized metadata (bytes)
+</span><span class="n">agent</span><span class="p">.</span><span class="nf">load_remote_md</span><span class="p">(</span><span class="n">remote_agent_md</span><span class="p">)</span>  <span class="c1"># Load remote agent info
+# Only after load can you create transfer requests to that remote Agent.
+</span>
+<span class="c1"># ─── Phase 4: Create and Execute Transfer ───
+# create: backend selection + resource allocation → returns handle (transfer not started yet)
+</span><span class="n">handle</span> <span class="o">=</span> <span class="n">agent</span><span class="p">.</span><span class="nf">create_xfer_req</span><span class="p">(</span><span class="n">local_descs</span><span class="p">,</span> <span class="n">remote_descs</span><span class="p">,</span> <span class="sh">"</span><span class="s">decode_worker_0</span><span class="sh">"</span><span class="p">,</span> <span class="n">WRITE</span><span class="p">)</span>
+<span class="c1"># post: actually starts the async transfer
+</span><span class="n">agent</span><span class="p">.</span><span class="nf">post_xfer_req</span><span class="p">(</span><span class="n">handle</span><span class="p">)</span>
+
+<span class="c1"># ─── Phase 5: Completion Check (non-blocking) ───
+# Poll until transfer completes. GPU is free to do other work in the meantime.
+</span><span class="k">while</span> <span class="n">agent</span><span class="p">.</span><span class="nf">get_xfer_status</span><span class="p">(</span><span class="n">handle</span><span class="p">)</span> <span class="o">==</span> <span class="n">IN_PROGRESS</span><span class="p">:</span>
+    <span class="k">pass</span>  <span class="c1"># Or perform prefill for other requests
+# Release handle after completion
+</span><span class="n">agent</span><span class="p">.</span><span class="nf">release_xfer_req</span><span class="p">(</span><span class="n">handle</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>The key design is that <strong>create and post are separated</strong>. <code class="language-plaintext highlighter-rouge">create</code> handles backend selection and resource allocation upfront, while <code class="language-plaintext highlighter-rouge">post</code> triggers the actual data movement. This separation enables pre-allocation of resources and immediate, low-latency transfer initiation.</p>
+
+<p>Combining these three entities, the Transfer Agent accepts <strong>buffer list primitives</strong> (non-contiguous GPU memory address lists from PagedAttention) and returns an <strong>async handle</strong>. All transfers are non-blocking — <code class="language-plaintext highlighter-rouge">post_xfer_req()</code> returns immediately, and <code class="language-plaintext highlighter-rouge">get_xfer_status()</code> checks completion — preventing the GPU from sitting idle during transfer.</p>
+
+<p><img src="/assets/img/blog_nixl_3.png" alt="NIXL Transfer Request Lifecycle — from composing buffer lists to release." />
+<em>NIXL Transfer Request Lifecycle — from composing buffer lists to release.</em></p>
+
+<p><strong>READ vs WRITE</strong>: WRITE means the Prefill Worker pushes its KV Cache directly into the Decode Worker’s memory (push model). READ means the Decode Worker pulls from the Prefill Worker’s memory (pull model). Both are RDMA one-sided operations requiring no CPU involvement on the remote side. vLLM’s NixlConnector uses the WRITE mode.</p>
+
+<hr />
+
+<h2 id="4-vllm-nixlconnector--kv-cache-transfer-in-practice">4. vLLM NixlConnector — KV Cache Transfer in Practice</h2>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Prefill instance</span>
+<span class="nv">CUDA_VISIBLE_DEVICES</span><span class="o">=</span>0 <span class="se">\</span>
+<span class="nv">UCX_NET_DEVICES</span><span class="o">=</span>all <span class="se">\</span>
+<span class="nv">VLLM_NIXL_SIDE_CHANNEL_PORT</span><span class="o">=</span>5601 <span class="se">\</span>
+vllm serve meta-llama/Llama-3.1-70B-Instruct <span class="se">\</span>
+  <span class="nt">--port</span> 8100 <span class="se">\</span>
+  <span class="nt">--kv-transfer-config</span> <span class="s1">'{
+    "kv_connector": "NixlConnector",
+    "kv_role": "kv_both"
+  }'</span>
+
+<span class="c"># Decode instance</span>
+<span class="nv">CUDA_VISIBLE_DEVICES</span><span class="o">=</span>1 <span class="se">\</span>
+<span class="nv">UCX_NET_DEVICES</span><span class="o">=</span>all <span class="se">\</span>
+<span class="nv">VLLM_NIXL_SIDE_CHANNEL_PORT</span><span class="o">=</span>5602 <span class="se">\</span>
+vllm serve meta-llama/Llama-3.1-70B-Instruct <span class="se">\</span>
+  <span class="nt">--port</span> 8200 <span class="se">\</span>
+  <span class="nt">--kv-transfer-config</span> <span class="s1">'{
+    "kv_connector": "NixlConnector",
+    "kv_role": "kv_both"
+  }'</span>
+
+<span class="c"># Proxy server (request routing)</span>
+python toy_proxy_server.py <span class="se">\</span>
+  <span class="nt">--port</span> 8192 <span class="se">\</span>
+  <span class="nt">--prefiller-hosts</span> localhost <span class="nt">--prefiller-ports</span> 8100 <span class="se">\</span>
+  <span class="nt">--decoder-hosts</span> localhost <span class="nt">--decoder-ports</span> 8200
+</code></pre></div></div>
+
+<h3 id="41-vllms-kv-connector-architecture">4.1 vLLM’s KV Connector Architecture</h3>
+
+<p>vLLM’s Disaggregated Serving supports various transfer backends through the <code class="language-plaintext highlighter-rouge">KVConnector</code> abstraction:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>vLLM KV Connector Plugins:
+├── NixlConnector      — NIXL-based, fully async (recommended default)
+├── LMCacheConnectorV1 — LMCache library (can use NIXL internally)
+├── P2pNcclConnector   — NCCL P2P-based
+└── MooncakeConnector  — Mooncake Transfer Engine
+</code></pre></div></div>
+
+<p>The NixlConnector is implemented in <code class="language-plaintext highlighter-rouge">vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py</code> and operates at two layers:</p>
+
+<ol>
+  <li><strong>Scheduler Connector</strong> (EngineCore process):
+    <ul>
+      <li>Decides which requests’ KV Cache to transfer</li>
+      <li>Transfer scheduling (block mapping, timing)</li>
+      <li>Transfer completion tracking</li>
+    </ul>
+  </li>
+  <li><strong>Worker Connector</strong> (GPU Worker process):
+    <ul>
+      <li>Manages the actual NIXL Agent</li>
+      <li>Memory registration and metadata exchange</li>
+      <li>Async transfer execution and status checking</li>
+    </ul>
+  </li>
+</ol>
+
+<h3 id="42-key-configuration-details">4.2 Key Configuration Details</h3>
+
+<ul>
+  <li><strong><code class="language-plaintext highlighter-rouge">kv_role: "kv_both"</code></strong>: A single instance can perform both Prefill and Decode. This provides flexibility — the Proxy server can dynamically decide which instance handles Prefill and which handles Decode.</li>
+  <li><strong><code class="language-plaintext highlighter-rouge">VLLM_NIXL_SIDE_CHANNEL_PORT</code></strong>: Each instance requires a unique port. In TP/DP deployments, each rank needs its own port.</li>
+</ul>
+
+<hr />
+
+<h2 id="5-debugging-ucx-memory-leak-in-disaggregated-serving">5. Debugging: UCX Memory Leak in Disaggregated Serving</h2>
+
+<h3 id="51-symptom">5.1 Symptom</h3>
+
+<p>A memory leak was observed that could not be reproduced with a single vLLM instance or a simple UCX test tool. It only occurred when <strong>all</strong> of the following conditions were met:</p>
+
+<ul>
+  <li>vLLM + <strong>NIXL</strong> + <strong>UCX</strong> (InfiniBand) in P/D disaggregated setup</li>
+  <li>System memory (RSS) grew linearly at <strong>~400 MB/min</strong> on the <strong>Decode instance only</strong></li>
+  <li>Prefill side was normal → the problem was exclusive to the <strong>receiving side</strong> of KV Cache transfers</li>
+  <li>Eventually led to OOM (Out of Memory) after several hours</li>
+</ul>
+
+<p>The fact that it only occurred on the Decode side was the key clue. In P/D disaggregation, the Decode instance receives KV Cache from Prefill via NIXL (→ UCX → InfiniBand RDMA), making the KV Cache transfer path the prime suspect.</p>
+
+<h3 id="52-root-cause-ucxs-mmap-hooking-mechanism">5.2 Root Cause: UCX’s mmap Hooking Mechanism</h3>
+
+<h4 id="why-ucx-hooks-mmap">Why UCX hooks mmap</h4>
+
+<p>UCX maintains a <strong>Registration Cache (RCache)</strong> for InfiniBand RDMA transfer performance. RDMA requires registering memory with the NIC before transfer, and this registration is expensive. RCache avoids re-registering the same memory regions by caching previously registered mappings.</p>
+
+<p>The problem is: if the application calls <code class="language-plaintext highlighter-rouge">munmap</code> on a region that’s still in the RCache, the physical memory gets reassigned. If UCX later uses the stale cached registration, the NIC would read or overwrite memory that now belongs to something else — a correctness disaster.</p>
+
+<p>So UCX needs to know when the application frees memory. But UCX is just a library — it has no built-in way to know when <code class="language-plaintext highlighter-rouge">munmap</code> is called. UCX’s memory management module (UCM) solves this by <strong>dynamically patching the process’s GOT (Global Offset Table)</strong> at runtime, intercepting all <code class="language-plaintext highlighter-rouge">mmap</code>/<code class="language-plaintext highlighter-rouge">munmap</code> calls process-wide.</p>
+
+<p>The critical issue: this hooking intercepts <strong>all</strong> mmap/munmap calls in the process, not just UCX-related ones. Python interpreter, PyTorch, and every other library’s mmap calls all go through UCX.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Normal mmap call path:
+  Application → glibc mmap() → kernel syscall
+
+After UCX hooking:
+  Application → UCX-hooked mmap() → UCX RCache management → kernel syscall
+</code></pre></div></div>
+
+<h4 id="stack-trace-evidence">Stack trace evidence</h4>
+
+<p><strong>Stack Trace 1</strong>: Python’s memory allocator calling mmap, routed through UCX’s hook:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>#0  syscall()
+#1  ucm_orig_mmap_syscall()    ← UCX's mmap hook intercept
+#4  ucm_mmap()                 ← UCX-intercepted mmap
+#5  _PyMem_ArenaAlloc()        ← Python memory manager
+</code></pre></div></div>
+
+<p><strong>Stack Trace 2</strong>: Python calling munmap (memory free) but UCX internally triggering mmap (memory allocation):</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>#0  syscall()
+#1  ucm_orig_mmap_syscall()    ← mmap happening INSIDE munmap!
+#3  ucm_munmap()               ← Original munmap call
+</code></pre></div></div>
+
+<p><code class="language-plaintext highlighter-rouge">munmap</code> is supposed to free memory, but during that process, UCX was allocating new memory. This was the source of the leak.</p>
+
+<h3 id="53-why-mmap-happens-inside-munmap">5.3 Why mmap Happens Inside munmap</h3>
+
+<p>When <code class="language-plaintext highlighter-rouge">munmap</code> is called, UCX doesn’t immediately delete the corresponding RCache entry — it needs to communicate with the NIC, which is expensive. Instead, it puts the entry into an <strong>invalidation queue</strong> to be cleaned up later during <code class="language-plaintext highlighter-rouge">ucp_worker_progress()</code> calls.</p>
+
+<p>This queue itself is managed by UCX’s memory pool (<code class="language-plaintext highlighter-rouge">ucs_mpool</code>). When entries accumulate and the pool fills up, it calls <code class="language-plaintext highlighter-rouge">mmap</code> to grow — allocating new memory.</p>
+
+<p>Under normal operation, <code class="language-plaintext highlighter-rouge">ucp_worker_progress()</code> should drain the invalidation queue. NIXL and vLLM did call this function, but in this specific edge case, the cleanup was not triggered. Combined with <code class="language-plaintext highlighter-rouge">UCX_RCACHE_MAX_UNRELEASED</code> defaulting to <strong>infinity</strong>, the queue grew without bound.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>munmap called by Python/PyTorch
+  │
+  ▼
+UCX intercepts → adds RCache entry to invalidation queue
+  │
+  ▼
+Queue grows → ucs_mpool capacity exceeded
+  │
+  ▼
+ucs_mpool_grow() → mmap call (new memory allocation)
+  │
+  ▼
+This new memory also gets hooked by UCX → registered in RCache
+  │
+  ▼
+Queue cleanup never triggers → entries keep accumulating
+  │
+  ▼
+RSS grows linearly (~400 MB/min)
+</code></pre></div></div>
+
+<h3 id="54-the-fix">5.4 The Fix</h3>
+
+<p><strong>Fix 1: Disable mmap hooking</strong></p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nb">export </span><span class="nv">UCX_MEM_MMAP_HOOK_MODE</span><span class="o">=</span>none
+</code></pre></div></div>
+
+<p>This completely disables UCX’s mmap/munmap hooking. The memory leak was <strong>immediately resolved</strong>, with <strong>no performance impact</strong>.</p>
+
+<p>Why no performance degradation? vLLM’s KV Cache is a <strong>single large contiguous memory block pool</strong> allocated once at server startup. NIXL registers this memory once, and all subsequent transfers use the already-registered region. There’s no dynamic memory that needs RCache tracking during steady-state operation.</p>
+
+<p><strong>Fix 2: Limit invalidation queue size</strong></p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nb">export </span><span class="nv">UCX_RCACHE_MAX_UNRELEASED</span><span class="o">=</span>1024  <span class="c"># default: infinity</span>
+</code></pre></div></div>
+
+<p>This caps the invalidation queue, forcing UCX to start cleanup when the threshold is reached. This preserves hooking while preventing unbounded growth.</p>
+
+<p><strong>Upstream fixes</strong>: vLLM now includes <code class="language-plaintext highlighter-rouge">UCX_MEM_MMAP_HOOK_MODE=none</code> as a default setting (<a href="https://github.com/vllm-project/vllm/pull/32181">PR #32181</a>), and NIXL/UCX decided to change <code class="language-plaintext highlighter-rouge">UCX_RCACHE_MAX_UNRELEASED</code> from infinity to a finite default value (<a href="https://github.com/ai-dynamo/nixl/pull/1210">NIXL PR #1210</a>).</p>
+
+    </div>
+    
+    <footer class="post-footer">
+      
+      <a class="tag" href="#">["gpu",</a><a class="tag" href="#">"networking",</a><a class="tag" href="#">"nixl",</a><a class="tag" href="#">"vllm",</a><a class="tag" href="#">"llm",</a><a class="tag" href="#">"inference",</a><a class="tag" href="#">"rdma"]</a>
+    </footer>
+    
+  </div>
+</article>
+</main>
+  <footer class="site-foot">
+    <div class="foot-wrap">© Lucas Nam — all opinions my own.</div>
+  </footer>
+  <script src="/assets/js/toc.js"></script>
+</body>
+</html>

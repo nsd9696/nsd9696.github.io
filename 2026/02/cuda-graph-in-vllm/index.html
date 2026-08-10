@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // apply saved theme before paint to avoid flash
+    (function(){ var t='light'; try{ t=localStorage.getItem('theme')||'light'; }catch(e){} document.documentElement.setAttribute('data-theme', t); })();
+  </script>
+  <title>CUDA Graph in vLLM: Eliminating CPU Overhead in LLM Inference · Lucas Nam</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,380;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+  <header class="site-head">
+    <div class="head-wrap">
+      <a class="brand" href="/">
+        <span class="brand-name">Lucas Nam</span>
+        <span class="brand-tag">engineering notes</span>
+      </a>
+      <nav class="site-nav">
+        <a href="/">About</a>
+        <a href="/blog/">Blog</a>
+        <a href="/publications/">Publications</a>
+        <a href="https://x.com/lucas_nam96">X</a>
+        <a href="https://www.linkedin.com/in/lucas-sangdae-nam-635a36193/">LinkedIn</a>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle light/dark theme">
+          <span class="icon-light">☀</span><span class="icon-dark">☾</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+  <main><article class="post">
+  <aside class="post-toc" aria-label="Table of contents">
+    <div class="toc-inner">
+      <p class="toc-head">Contents</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+  <div class="post-main">
+    <header class="post-header">
+      <p class="eyebrow">infrastructure</p>
+      <h1 class="post-title">CUDA Graph in vLLM: Eliminating CPU Overhead in LLM Inference</h1>
+      <p class="post-meta">
+        <span>Lucas Nam</span>
+        <span>February 28, 2026</span>
+        <span>10 min read</span>
+      </p>
+      <p class="post-lede">How CUDA Graph reduces CPU launch overhead in LLM decode, memory management with Private Pools, and vLLM's graph capture modes</p>
+    </header>
+    <div class="post-content">
+      <h2 id="1-why-cuda-graph--cpu-launch-overhead">1. Why CUDA Graph? — CPU Launch Overhead</h2>
+
+<p>Launching a single GPU kernel requires significant preparation on the CPU side. The host driver must load the kernel function, perform various validations, configure grid/block dimensions, allocate memory accordingly, and submit the kernel to a stream. While this overhead is only on the order of milliseconds per kernel, in patterns like LLM decode — where hundreds of short kernels execute in rapid succession — the cumulative CPU-side overhead causes substantial GPU idle time.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Traditional Execution (Sequential Kernel Launch):
+
+CPU:  [Launch A][Launch B][Launch C][Launch D][Launch E] ...
+GPU:  ──[A]──gap──[B]──gap──[C]──gap──[D]──gap──[E]──
+            ↑       ↑       ↑       ↑       ↑
+         GPU idle between each kernel launch
+</code></pre></div></div>
+
+<p>CUDA Graph solves this by <strong>capturing</strong> the entire sequence of kernel launches and then <strong>replaying</strong> it in one shot via <code class="language-plaintext highlighter-rouge">cudaGraphLaunch()</code>. Instead of the CPU issuing individual launch commands for each kernel, the driver submits the entire pre-recorded execution plan at once, virtually eliminating the per-kernel launch overhead.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>CUDA Graph Execution (Single Graph Launch):
+
+CPU:  [Graph Launch]
+GPU:  ──[A][B][C][D][E]──
+         ↑
+      All kernels dispatched at once, no gaps
+</code></pre></div></div>
+
+<h3 id="node-types-in-a-cuda-graph">Node Types in a CUDA Graph</h3>
+
+<p>A CUDA Graph is a DAG (Directed Acyclic Graph) where each node represents an operation. CUDA supports several node types:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>API</th>
+      <th>Parameters</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Kernel</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">cudaGraphAddKernelNode</code></td>
+      <td>Function pointer, grid/block dim, shared memory, kernel args</td>
+    </tr>
+    <tr>
+      <td><strong>Memcpy</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">cudaGraphAddMemcpyNode</code></td>
+      <td>src/dst pointer, size, direction (H2D/D2H/D2D)</td>
+    </tr>
+    <tr>
+      <td><strong>Memset</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">cudaGraphAddMemsetNode</code></td>
+      <td>dst pointer, value, size</td>
+    </tr>
+    <tr>
+      <td><strong>Host</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">cudaGraphAddHostNode</code></td>
+      <td>CPU callback function and user data</td>
+    </tr>
+    <tr>
+      <td><strong>MemAlloc</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">cudaGraphAddMemAllocNode</code></td>
+      <td>Allocation size, attributes (CUDA 11.4+)</td>
+    </tr>
+    <tr>
+      <td><strong>MemFree</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">cudaGraphAddMemFreeNode</code></td>
+      <td>Target pointer</td>
+    </tr>
+    <tr>
+      <td><strong>Child Graph</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">cudaGraphAddChildGraphNode</code></td>
+      <td>Sub-graph</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr />
+
+<h2 id="2-cuda-graph-dag-in-llm-decode">2. CUDA Graph DAG in LLM Decode</h2>
+
+<p>To visualize what a CUDA Graph DAG looks like for the LLM decode stage, consider the following pipeline. Each box represents a graph node with its operation type, kernel function, launch configuration, and arguments:</p>
+
+<p><img src="/assets/img/blog_cuda_graph_1.png" alt="CUDA Graph DAG for a single Transformer decoder layer during inference. Root nodes (Memset and H2D Memcpy) have no dependencies and can execute concurrently. RoPE for Q and K also fork in parallel before joining at the Flash Attention node." />
+<em>CUDA Graph DAG for a single Transformer decoder layer during inference. Root nodes (Memset and H2D Memcpy) have no dependencies and can execute concurrently. RoPE for Q and K also fork in parallel before joining at the Flash Attention node.</em></p>
+
+<p>Key observations:</p>
+
+<ul>
+  <li><strong>Root nodes execute concurrently</strong>: The Memset (zero output buffer) and Memcpy H2D (token embeddings) nodes have no dependencies and can run in parallel.</li>
+  <li><strong>Fork/Join parallelism</strong>: RoPE for Q and K are independent and execute on parallel branches before synchronizing at the Flash Attention node.</li>
+  <li><strong>The entire pipeline is a single graph launch</strong>: From embedding transfer to logits D2H copy, every operation is captured as one graph and replayed with a single <code class="language-plaintext highlighter-rouge">cudaGraphLaunch()</code> call.</li>
+</ul>
+
+<hr />
+
+<h2 id="3-cuda-graph-lifecycle">3. CUDA Graph Lifecycle</h2>
+
+<p>The lifecycle of a CUDA Graph consists of three phases:</p>
+
+<ol>
+  <li><strong>Definition</strong>: Create a graph template (<code class="language-plaintext highlighter-rouge">cudaGraph_t</code>). This is the “blueprint” phase where you define what operations to perform, their parameters, and their dependency relationships.</li>
+  <li><strong>Instantiation</strong>: Convert the graph template into an executable graph (<code class="language-plaintext highlighter-rouge">cudaGraphExec_t</code>). During this step, the driver performs snapshot validation, resource allocation, and other preparations.</li>
+  <li><strong>Execution</strong>: Submit the executable graph to a stream via <code class="language-plaintext highlighter-rouge">cudaGraphLaunch()</code>.</li>
+</ol>
+
+<h3 id="handling-dynamic-parameters">Handling Dynamic Parameters</h3>
+
+<p>In practice, CUDA Graphs must deal with changing conditions. During decode, the number of requests being processed (batch size) changes, which alters grid dimensions. Parameters like <code class="language-plaintext highlighter-rouge">learning_rate</code> (training) or <code class="language-plaintext highlighter-rouge">temperature</code> (inference) can also vary between iterations. Re-capturing and re-instantiating the graph every time would negate the performance benefits.</p>
+
+<p>CUDA provides <strong>graph update</strong> mechanisms for this. <code class="language-plaintext highlighter-rouge">cudaGraphExecUpdate()</code> allows modifying parameters of an already-instantiated executable graph (e.g., kernel arguments, grid dimensions) without going through the full capture-instantiate cycle again — as long as the graph topology remains the same.</p>
+
+<h3 id="graph-construction-methods">Graph Construction Methods</h3>
+
+<h4 id="explicit-api">Explicit API</h4>
+
+<p>Create an empty graph with <code class="language-plaintext highlighter-rouge">cudaGraphCreate()</code> and add nodes one by one with <code class="language-plaintext highlighter-rouge">cudaGraphAddKernelNode()</code>. This gives fine-grained control over graph structure but is impractical when hundreds of kernels are dynamically determined at runtime.</p>
+
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">cudaKernelNodeParams</span> <span class="n">kParams</span> <span class="o">=</span> <span class="p">{</span><span class="mi">0</span><span class="p">};</span>
+<span class="n">kParams</span><span class="p">.</span><span class="n">func</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">myKernel</span><span class="p">;</span>       <span class="c1">// kernel function pointer</span>
+<span class="n">kParams</span><span class="p">.</span><span class="n">gridDim</span> <span class="o">=</span> <span class="n">dim3</span><span class="p">(</span><span class="n">blocks</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+<span class="n">kParams</span><span class="p">.</span><span class="n">blockDim</span> <span class="o">=</span> <span class="n">dim3</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+<span class="n">kParams</span><span class="p">.</span><span class="n">sharedMemBytes</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+<span class="kt">void</span><span class="o">*</span> <span class="n">args</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span><span class="o">&amp;</span><span class="n">d_out</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">d_in</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">size</span><span class="p">};</span>
+<span class="n">kParams</span><span class="p">.</span><span class="n">kernelParams</span> <span class="o">=</span> <span class="n">args</span><span class="p">;</span>           <span class="c1">// pointer addresses copied by value</span>
+
+<span class="n">cudaGraphNode_t</span> <span class="n">node</span><span class="p">;</span>
+<span class="n">cudaGraphAddKernelNode</span><span class="p">(</span><span class="o">&amp;</span><span class="n">node</span><span class="p">,</span> <span class="n">graph</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">kParams</span><span class="p">);</span>
+</code></pre></div></div>
+
+<h4 id="stream-capture">Stream Capture</h4>
+
+<p>Stream Capture records all CUDA operations submitted to a stream during a capture region and automatically builds the graph. This is the method used in practice for deep learning frameworks:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># PyTorch stream capture
+</span><span class="n">g</span> <span class="o">=</span> <span class="n">torch</span><span class="p">.</span><span class="n">cuda</span><span class="p">.</span><span class="nc">CUDAGraph</span><span class="p">()</span>
+<span class="k">with</span> <span class="n">torch</span><span class="p">.</span><span class="n">cuda</span><span class="p">.</span><span class="nf">graph</span><span class="p">(</span><span class="n">g</span><span class="p">):</span>
+    <span class="n">output</span> <span class="o">=</span> <span class="nf">model</span><span class="p">(</span><span class="n">static_input</span><span class="p">)</span>   <span class="c1"># All CUDA ops inside are recorded
+</span><span class="n">g</span><span class="p">.</span><span class="nf">replay</span><span class="p">()</span>                         <span class="c1"># Replay the captured graph
+</span></code></pre></div></div>
+
+<h3 id="what-does-a-captured-graph-contain">What Does a Captured Graph Contain?</h3>
+
+<p>Each kernel node in a captured graph stores:</p>
+
+<ol>
+  <li><strong>Kernel function pointer</strong> (<code class="language-plaintext highlighter-rouge">void* func</code>): Points to the memory address of the loaded kernel binary — identifies which GPU function to call.</li>
+  <li><strong>gridDim</strong>: Number of thread blocks.</li>
+  <li><strong>blockDim</strong>: Number of threads per block.</li>
+  <li><strong>sharedMemBytes</strong>: Shared memory size.</li>
+  <li><strong>Arguments</strong>: All kernel arguments, including both scalar values and pointers.</li>
+</ol>
+
+<hr />
+
+<h2 id="4-memory-management-in-cuda-graph-private-pools">4. Memory Management in CUDA Graph: Private Pools</h2>
+
+<h3 id="the-problem-with-pytorchs-default-allocator">The Problem with PyTorch’s Default Allocator</h3>
+
+<p>PyTorch uses <code class="language-plaintext highlighter-rouge">CUDACachingAllocator</code> instead of raw <code class="language-plaintext highlighter-rouge">cudaMalloc()</code> calls, because the traditional allocation path (CPU -&gt; OS kernel -&gt; GPU driver -&gt; GPU hardware) is inherently slow. The caching allocator retains freed GPU memory in an internal pool rather than returning it to the OS, enabling fast reuse.</p>
+
+<p>However, this creates a problem when combined with CUDA Graphs:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>1. CUDA Graph Capture:
+   with torch.cuda.graph(g):
+       temp = model(input)      # temp allocated at 0x...C000
+       output = process(temp)   # output allocated at 0x...D000
+       del temp                 # 0x...C000 returned to pool
+
+   -&gt; Graph records addresses: 0x...C000 (temp), 0x...D000 (output)
+
+2. After capture, normal code runs:
+   something = torch.randn(same_size, device='cuda')
+   -&gt; Pool searches for free block -&gt; finds 0x...C000 -&gt; reuses it
+   -&gt; something's address = 0x...C000
+
+3. Graph replay:
+   g.replay()
+   -&gt; Graph writes temp data to 0x...C000
+   -&gt; CORRUPTS 'something' tensor!
+</code></pre></div></div>
+
+<p>The graph “remembers” specific memory addresses from capture time, but the general-purpose pool doesn’t know those addresses are reserved.</p>
+
+<h3 id="the-solution-private-pools">The Solution: Private Pools</h3>
+
+<p>To solve this, CUDA Graph capture uses <strong>Private Pools</strong> — dedicated memory pools that are exclusively reserved for graph operations:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>┌───────────────────────────────────────────┐
+│              GPU Memory                    │
+│                                            │
+│  ┌──────────────────┐  ┌────────────────┐ │
+│  │ Global Pool       │  │ Private Pool   │ │
+│  │                    │  │ (Graph-only)   │ │
+│  │ General tensor     │  │                │ │
+│  │ allocation         │  │ External       │ │
+│  │ Anyone can reuse   │  │ access blocked │ │
+│  │                    │  │ Only graph can │ │
+│  │                    │  │ use this pool  │ │
+│  └──────────────────┘  └────────────────┘ │
+└───────────────────────────────────────────┘
+</code></pre></div></div>
+
+<p>With Private Pools:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>1. Capture:
+   temp = model(input)      # Private Pool allocates 0x...C000
+   output = process(temp)   # Private Pool allocates 0x...D000
+   del temp                 # 0x...C000 returned to Private Pool
+
+2. After capture, normal code:
+   something = torch.randn(same_size, device='cuda')
+   -&gt; Searches Global Pool only -&gt; Private Pool excluded
+   -&gt; Allocates 0x...B000 from Global Pool
+   -&gt; 0x...C000 is untouched
+
+3. Graph replay:
+   g.replay()
+   -&gt; 0x...C000 is still graph-exclusive -&gt; safe to use
+</code></pre></div></div>
+
+<hr />
+
+<h2 id="5-cuda-graph-in-vllm">5. CUDA Graph in vLLM</h2>
+
+<h3 id="vllms-memory-architecture">vLLM’s Memory Architecture</h3>
+
+<p>vLLM uses PagedAttention for efficient KV Cache management. The KV Cache is managed as fixed-size blocks, and the <strong>base pointers</strong> of these blocks are allocated once during model initialization and remain fixed. What changes between iterations is only the <strong>block table</strong> — the mapping of which logical blocks point to which physical blocks. Since the base pointers don’t change, they are safe to hardcode in a captured CUDA Graph.</p>
+
+<h3 id="vllms-graph-dispatch-architecture">vLLM’s Graph Dispatch Architecture</h3>
+
+<p>vLLM caches graphs per batch size. On a cache miss, it captures a new graph; on a cache hit, it updates static buffers and replays.</p>
+
+<p><img src="/assets/img/blog_cuda_graph_2.png" alt="vLLM CUDA Graph execution stack. The CudagraphDispatcher analyzes each batch and selects the runtime mode. The CUDAGraphWrapper manages per-batch-size graph caching, capturing new graphs on cache miss and replaying on cache hit." />
+<em>vLLM CUDA Graph execution stack. The CudagraphDispatcher analyzes each batch and selects the runtime mode. The CUDAGraphWrapper manages per-batch-size graph caching, capturing new graphs on cache miss and replaying on cache hit.</em></p>
+
+<h3 id="why-attention-is-problematic-for-cuda-graphs">Why Attention Is Problematic for CUDA Graphs</h3>
+
+<p>Attention operations in LLMs have several properties that conflict with CUDA Graph’s static nature:</p>
+
+<ol>
+  <li><strong>Variable sequence lengths</strong>: In prefill, input lengths differ per request, causing the attention kernel’s grid dimensions to change.</li>
+  <li><strong>Dynamic KV Cache indexing</strong>: PagedAttention’s block addresses and block tables change between iterations. Capturing the entire attention within a single graph requires padding inputs to remove variability — but this is only supported by certain attention backends.</li>
+</ol>
+
+<h3 id="flash-attention-2-vs-flash-attention-3">Flash-Attention-2 vs Flash-Attention-3</h3>
+
+<p><strong>Flash-Attention-2</strong>:</p>
+<ul>
+  <li>Grid dimensions change based on the requested sequence lengths.</li>
+  <li>Variable-length requests are packed using a <code class="language-plaintext highlighter-rouge">cu_seqlens</code> array, and the grid dimension varies with the array length.</li>
+  <li>As a result, <strong>prefill with Flash-Attention-2 cannot be graph-captured</strong>.</li>
+</ul>
+
+<p><strong>Flash-Attention-3</strong>:</p>
+<ul>
+  <li>Designed from the ground up with CUDA Graph compatibility in mind.</li>
+  <li>Uses a <strong>fixed maximum grid dimension</strong> regardless of actual sequence lengths.</li>
+  <li>When the actual workload is smaller than the maximum, the remaining threads simply pad/idle.</li>
+  <li>This enables <strong>full graph capture even during prefill</strong>.</li>
+</ul>
+
+<h3 id="vllms-cuda-graph-modes">vLLM’s CUDA Graph Modes</h3>
+
+<p>vLLM provides five compilation modes to handle the tension between graph capture and attention flexibility:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Mode</th>
+      <th>Behavior</th>
+      <th>Best For</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>NONE</strong></td>
+      <td>Eager execution (no graphs)</td>
+      <td>Debugging</td>
+    </tr>
+    <tr>
+      <td><strong>PIECEWISE</strong></td>
+      <td>Captures everything except attention</td>
+      <td>Most attention backends</td>
+    </tr>
+    <tr>
+      <td><strong>FULL</strong></td>
+      <td>Captures entire forward pass as one graph</td>
+      <td>Compatible backends (e.g., FlashAttention-3)</td>
+    </tr>
+    <tr>
+      <td><strong>FULL_DECODE_ONLY</strong></td>
+      <td>Full graph for decode only, no graph for prefill</td>
+      <td>P/D disaggregated serving (saves memory)</td>
+    </tr>
+    <tr>
+      <td><strong>FULL_AND_PIECEWISE</strong></td>
+      <td>Full graph for decode, piecewise for prefill</td>
+      <td><strong>vLLM v1 default</strong> — best overall performance</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>PIECEWISE</strong> mode splits the forward pass at attention boundaries. Everything before and after attention is graph-captured, while attention itself runs eagerly. This provides most of the CUDA Graph benefits while maintaining compatibility with backends that have dynamic grid dimensions.</p>
+
+<p><strong>FULL</strong> mode captures the entire forward pass including attention. This requires an attention backend that supports fixed grid dimensions (like FlashAttention-3).</p>
+
+<p><strong>FULL_DECODE_ONLY</strong> captures a full graph only for decode steps and runs prefill without any graph. This is ideal for Prefill/Decode disaggregated deployments where the decode instance never needs to handle prefill.</p>
+
+<p><strong>FULL_AND_PIECEWISE</strong> is the <strong>default in vLLM v1</strong>. It uses full graph capture for decode (where batch size is the only variable and sequence length is always 1) and piecewise capture for prefill (where sequence lengths vary). This combination works with most attention backends and delivers the best overall performance.</p>
+
+    </div>
+    
+    <footer class="post-footer">
+      
+      <a class="tag" href="#">["cuda",</a><a class="tag" href="#">"gpu",</a><a class="tag" href="#">"vllm",</a><a class="tag" href="#">"llm",</a><a class="tag" href="#">"inference",</a><a class="tag" href="#">"optimization"]</a>
+    </footer>
+    
+  </div>
+</article>
+</main>
+  <footer class="site-foot">
+    <div class="foot-wrap">© Lucas Nam — all opinions my own.</div>
+  </footer>
+  <script src="/assets/js/toc.js"></script>
+</body>
+</html>

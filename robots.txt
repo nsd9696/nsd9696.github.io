@@ -1,4 +1,0 @@
-User-agent: *
-Disallow:
-
-Sitemap: https://nsd9696.github.io/sitemap.xml
