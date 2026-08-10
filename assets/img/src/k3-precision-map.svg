@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="378" viewBox="0 0 700 378" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+  <rect width="700" height="378" fill="#ffffff"/>
+
+  <text x="30" y="30" font-size="10.5" fill="#8a9099" letter-spacing="1.4">KIMI-K3-W4AFP8 CHECKPOINT</text>
+  <text x="30" y="54" font-size="16.5" fill="#1a1d21" font-weight="600">249,694 weight tensors — what each one became</text>
+
+  <!-- ── full bar ── -->
+  <text x="670" y="76" font-size="10.5" fill="#8a9099" text-anchor="end">everything else — 2,398 (0.96%)</text>
+  <rect x="30" y="84" width="633.85" height="46" fill="#0f766e"/>
+  <rect x="663.85" y="84" width="6.15" height="46" fill="#c3c8cf"/>
+  <rect x="30" y="84" width="640" height="46" fill="none" stroke="#1a1d21" stroke-width="1"/>
+  <text x="44" y="105" font-size="12.5" fill="#ffffff" font-weight="600">routed experts</text>
+  <text x="44" y="121" font-size="11" fill="#a7e5dc" font-family="Menlo, monospace">247,296 · INT4 group-128 + FP8 activations</text>
+
+  <!-- leader -->
+  <path d="M667 132 L 667 148 L 30 148" fill="none" stroke="#c3c8cf" stroke-width="1" stroke-dasharray="3 3"/>
+
+  <!-- ── breakdown ── -->
+  <text x="30" y="172" font-size="11" fill="#8a9099" letter-spacing=".6">THE REMAINING 2,398 TENSORS</text>
+
+  <g font-size="12">
+    <!-- 393 -->
+    <rect x="30" y="185" width="11" height="11" fill="#b45309"/>
+    <text x="102" y="195" fill="#1a1d21" text-anchor="end" font-family="Menlo, monospace" font-weight="600">393</text>
+    <text x="118" y="195" fill="#3c434b">attention — q / k / v / g / o proj</text>
+    <text x="670" y="195" fill="#b45309" text-anchor="end" font-family="Menlo, monospace">FP8 E4M3</text>
+
+    <!-- 627 -->
+    <rect x="30" y="211" width="11" height="11" fill="#ccd2d8" stroke="#9aa3ad"/>
+    <text x="102" y="221" fill="#1a1d21" text-anchor="end" font-family="Menlo, monospace" font-weight="600">627</text>
+    <text x="118" y="221" fill="#3c434b">attention — kv_b / q_b / f_a / f_b / b proj</text>
+    <text x="670" y="221" fill="#8a9099" text-anchor="end" font-family="Menlo, monospace">bf16</text>
+
+    <!-- 276 -->
+    <rect x="30" y="237" width="11" height="11" fill="#ccd2d8" stroke="#9aa3ad"/>
+    <text x="102" y="247" fill="#1a1d21" text-anchor="end" font-family="Menlo, monospace" font-weight="600">276</text>
+    <text x="118" y="247" fill="#3c434b">shared experts</text>
+    <text x="670" y="247" fill="#8a9099" text-anchor="end" font-family="Menlo, monospace">bf16</text>
+
+    <!-- 168 -->
+    <rect x="30" y="263" width="11" height="11" fill="#ccd2d8" stroke="#9aa3ad"/>
+    <text x="102" y="273" fill="#1a1d21" text-anchor="end" font-family="Menlo, monospace" font-weight="600">168</text>
+    <text x="118" y="273" fill="#3c434b">vision tower / mm projector</text>
+    <text x="670" y="273" fill="#8a9099" text-anchor="end" font-family="Menlo, monospace">bf16</text>
+
+    <!-- 934 -->
+    <rect x="30" y="289" width="11" height="11" fill="#ccd2d8" stroke="#9aa3ad"/>
+    <text x="102" y="299" fill="#1a1d21" text-anchor="end" font-family="Menlo, monospace" font-weight="600">934</text>
+    <text x="118" y="299" fill="#3c434b">norms, dense MLP, lm_head</text>
+    <text x="670" y="299" fill="#8a9099" text-anchor="end" font-family="Menlo, monospace">bf16</text>
+  </g>
+
+  <line x1="30" y1="322" x2="670" y2="322" stroke="#e4e7ea"/>
+  <text x="30" y="345" font-size="11.5" fill="#3c434b">Experts are 99% of the tensors and tolerate 4 bits — only a few fire per token, so errors average out.</text>
+  <text x="30" y="364" font-size="11.5" fill="#6b7280">Attention sees every token at every layer, so most of it was left alone.</text>
+</svg>

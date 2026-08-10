@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="486" viewBox="0 0 700 486" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+  <rect width="700" height="486" fill="#ffffff"/>
+  <defs>
+    <marker id="dn" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 z" fill="#8a9099"/>
+    </marker>
+  </defs>
+
+  <text x="30" y="30" font-size="10.5" fill="#8a9099" letter-spacing="1.4">FP8 KV CACHE ON HOPPER</text>
+  <text x="30" y="54" font-size="16.5" fill="#1a1d21" font-weight="600">Turning it on made things slower. Here is where the time went.</text>
+
+  <!-- ── flow ── -->
+  <rect x="30" y="76" width="640" height="42" rx="5" fill="#f3f5f7" stroke="#c3c8cf"/>
+  <text x="46" y="102" font-size="12.5" fill="#1a1d21">MLA head dimension</text>
+  <text x="654" y="102" font-size="13" fill="#1a1d21" text-anchor="end" font-family="Menlo, monospace" font-weight="600">512 + 64 = 576</text>
+
+  <path d="M350 120 L 350 134" stroke="#8a9099" stroke-width="1.3" marker-end="url(#dn)"/>
+
+  <rect x="30" y="140" width="640" height="42" rx="5" fill="#fff6ed" stroke="#e2b27a"/>
+  <text x="46" y="166" font-size="12.5" fill="#1a1d21">FlashAttention-3 fp8 fast path</text>
+  <text x="654" y="166" font-size="12" fill="#8a5a12" text-anchor="end" font-family="Menlo, monospace">gated on head_dim &#8804; 256</text>
+
+  <path d="M350 184 L 350 198" stroke="#8a9099" stroke-width="1.3" marker-end="url(#dn)"/>
+  <g stroke="#c2410c" stroke-width="2.2" stroke-linecap="round">
+    <path d="M366 184 L 378 196"/>
+    <path d="M378 184 L 366 196"/>
+  </g>
+  <text x="388" y="195" font-size="11.5" fill="#c2410c">576 fails the check, every time</text>
+
+  <rect x="30" y="204" width="640" height="42" rx="5" fill="#fdf2f0" stroke="#e3a89f"/>
+  <text x="46" y="230" font-size="12.5" fill="#1a1d21">fallback, once per layer</text>
+  <text x="654" y="230" font-size="12" fill="#a13c2c" text-anchor="end" font-family="Menlo, monospace">get_key_buffer(...).to(q.dtype)</text>
+
+  <!-- ── bars ── -->
+  <text x="30" y="288" font-size="13" fill="#1a1d21" font-weight="600">What that fallback touches, every forward pass</text>
+
+  <text x="30" y="318" font-size="12" fill="#5c646d">KV actually in use</text>
+  <rect x="190" y="303" width="480" height="22" fill="#eef0f3"/>
+  <rect x="190" y="303" width="9.6" height="22" fill="#0f766e"/>
+  <rect x="190" y="303" width="480" height="22" fill="none" stroke="#c3c8cf"/>
+  <text x="660" y="319" font-size="12" fill="#0f766e" text-anchor="end" font-family="Menlo, monospace" font-weight="600">2%</text>
+
+  <text x="30" y="356" font-size="12" fill="#5c646d">upcast to bf16</text>
+  <rect x="190" y="341" width="480" height="22" fill="#c2410c"/>
+  <text x="660" y="357" font-size="12" fill="#ffffff" text-anchor="end" font-family="Menlo, monospace" font-weight="600">100%  ·  332 M elements</text>
+
+  <!-- ── verdict ── -->
+  <rect x="30" y="388" width="640" height="52" rx="5" fill="#f3f5f7"/>
+  <text x="48" y="411" font-size="13.5" fill="#1a1d21" font-weight="600">50&#215; more conversion than the workload needed</text>
+  <text x="48" y="430" font-size="11.5" fill="#5c646d">dtype casts took 29.5% of GPU time — not the attention math, just moving between formats</text>
+
+  <text x="30" y="466" font-size="11.5" fill="#6b7280">Fixed by routing prefill through <tspan font-family="Menlo, monospace" fill="#3c434b">flashmla</tspan>, which dequantizes inside the kernel. 29.5% &#8594; 2.2%.</text>
+</svg>
