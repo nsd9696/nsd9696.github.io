@@ -53,7 +53,7 @@
     <div class="post-content">
       <p>Kimi-K3 came out and we wanted it on our endpoint the same week. The weights were right there on HuggingFace, 1.5 TB of them, already quantized to MXFP4. We had two nodes of 8×H200 sitting ready. This looked like a download-and-serve afternoon.</p>
 
-<p>It was not. The model loaded fine and then ran at a speed that made no sense — worse, in some configurations, than we had any right to expect from hardware this size. Working out <em>why</em> took us through the MoE runner matrix, a KV cache path that was quietly undoing its own optimization, and eventually to rebuilding the checkpoint ourselves.</p>
+<p>It was not. The model loaded fine and then ran at a speed that made no sense, worse in some configurations than we had any right to expect from hardware this size. Working out <em>why</em> took us through the MoE runner matrix, a KV cache path that was quietly undoing its own optimization, and eventually to rebuilding the checkpoint ourselves.</p>
 
 <p>This post is about that rebuild: what we changed, what we deliberately left alone, and why.</p>
 
@@ -62,7 +62,7 @@
 
 <hr />
 
-<h2 id="part-1--why-the-original-format-didnt-work">Part 1 — Why the original format didn’t work</h2>
+<h2 id="part-1-why-the-original-format-didnt-work">Part 1: Why the original format didn’t work</h2>
 
 <h3 id="mxfp4-is-not-blackwell-only-but-the-kernels-are">MXFP4 is not Blackwell-only, but the kernels are</h3>
 
@@ -103,9 +103,9 @@
 
 <p>So the blocker was never the hardware. It was the combination of this weight format and the kernel matrix available for it. On a B200 the same checkpoint would have had better options.</p>
 
-<h3 id="the-kv-cache-had-the-same-disease">The KV cache had the same disease</h3>
+<h3 id="the-kv-cache-had-the-same-problem">The KV cache had the same problem</h3>
 
-<p>While we were profiling, something else stood out. We had FP8 KV cache turned on — the obvious memory win for a long-context model — and it was making things <em>slower</em>.</p>
+<p>While we were profiling, something else stood out. We had FP8 KV cache turned on, the obvious memory win for a long-context model, and it was making things <em>slower</em>.</p>
 
 <p>The profile showed dtype casts eating <strong>29.5% of GPU time</strong>. Not the attention math. The casts.</p>
 
@@ -114,9 +114,9 @@
 <div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nf">get_key_buffer</span><span class="p">(...).</span><span class="nf">to</span><span class="p">(</span><span class="n">q</span><span class="p">.</span><span class="n">dtype</span><span class="p">)</span>   <span class="c1"># upcast the entire KV pool to bf16
 </span></code></pre></div></div>
 
-<p>The <em>entire pool</em>. 332 million elements of it, on every layer, on every forward pass. We measured the element count at 332,513,280 and the pool is 577,216 × 576 = 332,476,416 — a match to within 0.01%.</p>
+<p>The <em>entire pool</em>. 332 million elements of it, on every layer, on every forward pass. We measured the element count at 332,513,280 and the pool is 577,216 × 576 = 332,476,416, a match to within 0.01%.</p>
 
-<p>The part that stings: actual KV utilization at the time was around <strong>2%</strong>. We were converting 100% of the pool to use 2% of it — roughly fifty times more work than necessary.</p>
+<p>The part that stings: actual KV utilization at the time was around <strong>2%</strong>. We were converting 100% of the pool to use 2% of it, roughly fifty times more work than necessary.</p>
 
 <p><img src="/assets/img/k3-fp8-kv-cast.png" alt="Why FP8 KV cache was slower on Hopper. MLA's head dimension of 576 fails FlashAttention-3's fp8 fast path, which is gated on head_dim of 256 or less. The fallback upcasts the entire 332-million-element KV pool to bf16 once per layer, while only 2% of the pool is in use — 50 times more conversion than needed, costing 29.5% of GPU time." />
 <em>One gate check, missed by a factor of 2.25, and nearly a third of GPU time went to moving data between formats.</em></p>
@@ -127,17 +127,17 @@
 
 <hr />
 
-<h2 id="part-2--choosing-what-to-quantize">Part 2 — Choosing what to quantize</h2>
+<h2 id="part-2-choosing-what-to-quantize">Part 2: Choosing what to quantize</h2>
 
 <h3 id="w4afp8-4-bit-storage-8-bit-math">W4AFP8: 4-bit storage, 8-bit math</h3>
 
 <p>The recipe we landed on stores routed MoE expert weights as INT4 at group size 128 with per-group scales, and pairs them with static per-tensor FP8 (E4M3) activation scales carried in the checkpoint. SGLang’s <code class="language-plaintext highlighter-rouge">w4afp8</code> path collapses those into one activation scale per layer at load time, so it fits that serving stack particularly well.</p>
 
-<p>The interesting decision wasn’t the format. It was the scope.</p>
+<p>The decision that mattered wasn’t the format. It was the scope.</p>
 
 <h3 id="why-only-the-experts">Why only the experts</h3>
 
-<p>Out of 249,694 weight tensors, we converted 247,296 — all of them routed experts. Everything else stayed as it was.</p>
+<p>Out of 249,694 weight tensors, we converted 247,296, all of them routed experts. Everything else stayed as it was.</p>
 
 <table>
   <thead>
@@ -182,27 +182,27 @@
   </tbody>
 </table>
 
-<p>The asymmetry is the whole argument. Kimi-K3 routes each token to 16 of 896 experts, so any given expert sees under 2% of traffic, and an error in one of the 16 that did fire is averaged against the other 15. Attention has no such mercy — every token passes through every attention layer, and the errors compound rather than cancel.</p>
+<p>The asymmetry is the whole argument. Kimi-K3 routes each token to 16 of 896 experts, so any given expert sees under 2% of traffic, and an error in one of the 16 that did fire is averaged against the other 15. Attention gets no such averaging: every token passes through every attention layer, and the errors compound rather than cancel.</p>
 
 <p>That’s also why experts are the right target economically. They’re 99% of the tensors and nearly all of the parameter mass, so you get almost the entire size reduction from the part of the model that tolerates it best.</p>
 
 <h3 id="going-through-mxfp4-beats-going-through-bf16">Going through MXFP4 beats going through bf16</h3>
 
-<p>The conversion error measured <strong>8.11%</strong>. The control — taking the same tensors from bf16 and quantizing straight to INT4 — measured <strong>10.8–12.2%</strong>.</p>
+<p>The conversion error measured <strong>8.11%</strong>. The control, taking the same tensors from bf16 and quantizing straight to INT4, measured <strong>10.8–12.2%</strong>.</p>
 
 <p>Starting from the 4-bit grid is <em>better</em> than starting from full precision, which is backwards until you account for Kimi-K3 being a QAT model. The MXFP4 grid isn’t a lossy approximation of some truer bf16 value; training put the weights on that grid deliberately. Moving from one 4-bit grid to another is a smaller step than moving down from 16 bits.</p>
 
-<p>We also tested whether calibration-based methods like AWQ would help. They didn’t — the difference from plain round-to-nearest wasn’t statistically significant (the 95% confidence interval included zero). So we skipped it.</p>
+<p>We also tested whether calibration-based methods like AWQ would help. They didn’t: the difference from plain round-to-nearest wasn’t statistically significant (the 95% confidence interval included zero). So we skipped it.</p>
 
 <hr />
 
-<h2 id="part-3--proving-it-didnt-break-anything">Part 3 — Proving it didn’t break anything</h2>
+<h2 id="part-3-proving-it-didnt-break-anything">Part 3: Proving it didn’t break anything</h2>
 
 <p>This is the part that took the longest.</p>
 
 <h3 id="the-bar-2σ-not-looks-about-the-same">The bar: 2σ, not “looks about the same”</h3>
 
-<p>We set the pass criterion up front: every benchmark had to land within <strong>two standard errors</strong> of the published Kimi-K3 number. Two standard errors of the binomial at that benchmark’s sample size — not a flat percentage.</p>
+<p>We set the pass criterion up front: every benchmark had to land within <strong>two standard errors</strong> of the published Kimi-K3 number. Two standard errors of the binomial at that benchmark’s sample size, not a flat percentage.</p>
 
 <p>That distinction matters more than it sounds. OCRBench with 2,000 samples has a 2σ of ±1.4 points. AA-LCR with 100 samples has ±7.7. A fixed “within 2%” rule would be far too loose on one and impossibly strict on the other.</p>
 
@@ -270,17 +270,17 @@
 
 <p>A published number is only a control once you know what it measured, and for several of these the answer takes some digging.</p>
 
-<p><strong>MMMU-Pro</strong> has three subsets — 4-option, 10-option, and vision — all with exactly 1,730 items, so the count doesn’t identify them. The reference is <strong>vision</strong>. The card’s <code class="language-plaintext highlighter-rouge">81.6 / 83.4</code> pair is without and with tool augmentation, so a harness without tools compares against 81.6.</p>
+<p><strong>MMMU-Pro</strong> has three subsets (4-option, 10-option, and vision), all with exactly 1,730 items, so the count doesn’t identify them. The reference is <strong>vision</strong>. The card’s <code class="language-plaintext highlighter-rouge">81.6 / 83.4</code> pair is without and with tool augmentation, so a harness without tools compares against 81.6.</p>
 
-<p><strong>SciCode</strong> runs through the official <code class="language-plaintext highlighter-rouge">gencode.py</code>, which injects scaffolding into three steps and takes a <code class="language-plaintext highlighter-rouge">with_background</code> flag that <em>adds</em> annotated background rather than replacing anything. The reference has it on. Both settings matter: dropping the scaffolding cascades 22 of 288 sub-steps into failure, and turning background off costs 15.6 points — neither has anything to do with quantization.</p>
+<p><strong>SciCode</strong> runs through the official <code class="language-plaintext highlighter-rouge">gencode.py</code>, which injects scaffolding into three steps and takes a <code class="language-plaintext highlighter-rouge">with_background</code> flag that <em>adds</em> annotated background rather than replacing anything. The reference has it on. Both settings matter: dropping the scaffolding cascades 22 of 288 sub-steps into failure, and turning background off costs 15.6 points, and neither has anything to do with quantization.</p>
 
 <p><strong>Truncation is measurement failure, not a wrong answer.</strong> Responses that hit the token limit mid-reasoning are re-run rather than scored incorrect, and counted once.</p>
 
 <hr />
 
-<h2 id="part-4--the-results-and-the-second-round">Part 4 — The results, and the second round</h2>
+<h2 id="part-4-the-results-and-the-second-round">Part 4: The results, and the second round</h2>
 
-<p>With MoE quantized, we benchmarked against the original at identical settings — concurrency 8, ~1,530-token prompts, 256-token outputs:</p>
+<p>With MoE quantized, we benchmarked against the original at identical settings: concurrency 8, ~1,530-token prompts, 256-token outputs:</p>
 
 <table>
   <thead>
@@ -327,13 +327,13 @@
 
 <p>Four out of four improved, which is what you’d hope for when the MoE GEMM moves from bf16 tensor cores to FP8 ones.</p>
 
-<p>The unchanged accept length is worth a moment. Speculative decoding works by having a small draft model propose several tokens that the main model then verifies in one pass. If quantization shifted the target model’s output distribution at all, draft and target would start disagreeing and that number would drop. It didn’t move. That’s independent evidence — nothing to do with benchmarks — that the model still behaves like itself.</p>
+<p>The unchanged accept length is worth a moment. Speculative decoding works by having a small draft model propose several tokens that the main model then verifies in one pass. If quantization shifted the target model’s output distribution at all, draft and target would start disagreeing and that number would drop. It didn’t move. That’s independent evidence, nothing to do with benchmarks, that the model still behaves like itself.</p>
 
 <h3 id="round-two-the-attention-weights">Round two: the attention weights</h3>
 
-<p>Months later we came back for the memory. Attention weights and the KV cache compete for the same GPU memory, so shrinking one grows the other. We converted 393 attention tensors to FP8 — 96% by size, 64.5 GB of 67.4 GB.</p>
+<p>We came back for the memory. Attention weights and the KV cache compete for the same GPU memory, so shrinking one grows the other. We converted 393 attention tensors to FP8: 96% by size, 64.5 GB of 67.4 GB.</p>
 
-<p>Not 100%, and the missing 4% is the interesting part.</p>
+<p>Not 100%, and the missing 4% comes down to one code path.</p>
 
 <p><code class="language-plaintext highlighter-rouge">kimi_k3.py</code> has code that reaches past the quantization layer and reads <code class="language-plaintext highlighter-rouge">.weight</code> directly. Normally you’d never notice, because every access goes through the module call, which knows about the storage format. But the FP8 path stores weights <strong>transposed</strong> to satisfy <code class="language-plaintext highlighter-rouge">scaled_mm</code>, and a direct reader gets a flipped tensor and believes it’s the original:</p>
 
@@ -341,19 +341,19 @@
   kimi_k3.py  forget_gate = gemm(bfa[..., :n_fa], self.f_b_proj.weight)
 </code></pre></div></div>
 
-<p>So the exclusion list is every projection with a raw <code class="language-plaintext highlighter-rouge">.weight</code> reader: <code class="language-plaintext highlighter-rouge">kv_b_proj</code>, <code class="language-plaintext highlighter-rouge">q_b_proj</code>, <code class="language-plaintext highlighter-rouge">f_b_proj</code>, <code class="language-plaintext highlighter-rouge">f_a_proj</code>, <code class="language-plaintext highlighter-rouge">b_proj</code>. Together they’re 2.4 GB left on the table, and recovering them would mean patching the model code, not the checkpoint. Note the readers aren’t all reached through <code class="language-plaintext highlighter-rouge">self.</code> — <code class="language-plaintext highlighter-rouge">self_attn.kv_b_proj.weight</code> is one of them, so grep by attribute, not by receiver.</p>
+<p>So the exclusion list is every projection with a raw <code class="language-plaintext highlighter-rouge">.weight</code> reader: <code class="language-plaintext highlighter-rouge">kv_b_proj</code>, <code class="language-plaintext highlighter-rouge">q_b_proj</code>, <code class="language-plaintext highlighter-rouge">f_b_proj</code>, <code class="language-plaintext highlighter-rouge">f_a_proj</code>, <code class="language-plaintext highlighter-rouge">b_proj</code>. Together they’re 2.4 GB left on the table, and recovering them would mean patching the model code, not the checkpoint. Note the readers aren’t all reached through <code class="language-plaintext highlighter-rouge">self.</code>; <code class="language-plaintext highlighter-rouge">self_attn.kv_b_proj.weight</code> is one of them, so grep by attribute, not by receiver.</p>
 
 <h3 id="per-channel-per-tensor-and-why-it-doesnt-matter-here">Per-channel, per-tensor, and why it doesn’t matter here</h3>
 
 <p>Two scale granularities are in play. The runtime path quantizes attention weights <strong>per-channel</strong>; the serialized path used for a baked checkpoint expects <strong>per-tensor</strong>, because <code class="language-plaintext highlighter-rouge">convert_to_channelwise</code> indexes scales per logical shard. Activations are per-tensor dynamic in both.</p>
 
-<p>Dropping to per-tensor costs almost nothing. On a <code class="language-plaintext highlighter-rouge">q_proj</code> where row-wise amax varies by <strong>26×</strong>, relative error goes from 2.638% to 2.647%. FP8 has an exponent field, and e4m3’s normal range spans roughly 2¹⁵, so a 26× spread is absorbed. That is specific to floating-point formats — the intuition that per-tensor is destructive comes from INT8, where a fixed step size across a wide row makes it so.</p>
+<p>Dropping to per-tensor costs almost nothing. On a <code class="language-plaintext highlighter-rouge">q_proj</code> where the row-wise absolute max varies by <strong>26×</strong>, relative error goes from 2.638% to 2.647%. FP8 has an exponent field, and e4m3’s normal range spans roughly 2¹⁵, so a 26× spread is absorbed. That is specific to floating-point formats. The intuition that per-tensor is destructive comes from INT8, where a fixed step size across a wide row makes it so.</p>
 
-<p>One thing to watch when applying the patch: the module list is matched by name, and <strong>dp-attention renames the fused QKV module</strong> from <code class="language-plaintext highlighter-rouge">fused_qkvg_proj</code> to <code class="language-plaintext highlighter-rouge">qkv_proj</code> (it turns <code class="language-plaintext highlighter-rouge">do_fuse_qkvbfg</code> off). A name that doesn’t match isn’t an error — it silently leaves 45 GB in bf16 — so the patch logs what it matched. <code class="language-plaintext highlighter-rouge">qkv_proj: 69</code> matching the KDA layer count is the signal that it took.</p>
+<p>One thing to watch when applying the patch: the module list is matched by name, and <strong>dp-attention renames the fused QKV module</strong> from <code class="language-plaintext highlighter-rouge">fused_qkvg_proj</code> to <code class="language-plaintext highlighter-rouge">qkv_proj</code> (it turns <code class="language-plaintext highlighter-rouge">do_fuse_qkvbfg</code> off). A name that doesn’t match isn’t an error (it silently leaves 45 GB in bf16), so the patch logs what it matched. <code class="language-plaintext highlighter-rouge">qkv_proj: 69</code> matching the KDA layer count is the signal that it took.</p>
 
 <h3 id="where-the-memory-went">Where the memory went</h3>
 
-<p>The attention conversion on its own bought <strong>+47,488 tokens of KV pool (+5.3%)</strong>. Stacking dp-attention, fixed mamba slots, and a memory-fraction adjustment on top of it took the pool from 888,960 to <strong>2,213,760 tokens — 2.49×</strong>.</p>
+<p>The attention conversion on its own bought <strong>+47,488 tokens of KV pool (+5.3%)</strong>. Stacking dp-attention, fixed mamba slots, and a memory-fraction adjustment on top of it took the pool from 888,960 to <strong>2,213,760 tokens, 2.49×</strong>.</p>
 
 <p>That’s worth stating precisely, because it’s easy to imply the attention change did all of it. It didn’t. The single biggest lever was dp-attention, and the reason is structural: MLA can’t shard its latent KV within an attention-TP group, so all 16 ranks hold identical copies. Adding tensor parallelism buys you more copies, not more capacity. Splitting into two groups of 8 gives you two independent pools.</p>
 
