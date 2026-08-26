@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // apply saved theme before paint to avoid flash
+    (function(){ var t='light'; try{ t=localStorage.getItem('theme')||'light'; }catch(e){} document.documentElement.setAttribute('data-theme', t); })();
+  </script>
+  <title>temperature was 0 and the answers kept changing · Lucas Nam</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,380;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+  <header class="site-head">
+    <div class="head-wrap">
+      <a class="brand" href="/">
+        <span class="brand-name">Lucas Nam</span>
+        <span class="brand-tag">engineering notes</span>
+      </a>
+      <nav class="site-nav">
+        <a href="/">About</a>
+        <a href="/blog/">Blog</a>
+        <a href="/publications/">Publications</a>
+        <a href="https://x.com/lucas_nam96">X</a>
+        <a href="https://www.linkedin.com/in/lucas-sangdae-nam-635a36193/">LinkedIn</a>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle light/dark theme">
+          <span class="icon-light">☀</span><span class="icon-dark">☾</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+  <main><article class="post">
+  <aside class="post-toc" aria-label="Table of contents">
+    <div class="toc-inner">
+      <p class="toc-head">Contents</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+  <div class="post-main">
+    <header class="post-header">
+      <p class="eyebrow">infrastructure</p>
+      <h1 class="post-title">temperature was 0 and the answers kept changing</h1>
+      <p class="post-meta">
+        <span>Lucas Nam</span>
+        <span>August 24, 2026</span>
+        <span>14 min read</span>
+      </p>
+      <p class="post-lede">Batch invariance is not the only thing that makes LLM inference nondeterministic. Seven rows of leftover memory, one amax that read them anyway, and a top-k router thin enough at the cut that the last bit of the score decides.</p>
+    </header>
+    <div class="post-content">
+      <p>Temperature zero. Same prompt, same weights, same GPU, same process. Run it twice
+and the two completions diverge somewhere around token 40.</p>
+
+<p>The well-known explanation for this is batch invariance. Thinking Machines Lab
+<a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/">laid it out clearly</a>:
+your request gets batched with whatever else arrived at the same moment. Batch size
+changes how the reduction splits inside matmul, normalization, and attention.
+Floating-point addition isn’t associative. So the same input row comes out different
+depending on who else was in the batch. Fix the kernels to reduce in a
+batch-independent order and the problem goes away.</p>
+
+<p>That cause is real and so is the fix. But we lost the most time to a second one that
+batch-invariant kernels do nothing about. Every symptom pointed at the kernels, which
+turned out to be fine. It came down to <strong>seven rows of leftover memory nobody had
+zeroed, one <code class="language-plaintext highlighter-rouge">amax</code> that read them anyway, and a router with 24.3% of its tokens on a
+knife edge.</strong></p>
+
+<p><img src="/assets/img/nd-scale-coupling.png" alt="Two schemes for computing an FP8 activation scale, side by side. With a per-tensor scale, every activation row including the padded ones feeds a single scalar s, and s feeds every output row, so stale bytes in the pad region reach the real tokens. With a per-token scale, each row computes its own scale, and the padded rows' scales are discarded along with the padded rows." />
+<em>The padded rows get thrown away in both schemes. Only the right-hand one keeps them out of the arithmetic first.</em></p>
+
+<hr />
+
+<h2 id="three-things-have-to-line-up">Three things have to line up</h2>
+
+<p>Batch invariance is about what order the numbers get summed in. This one is about
+which numbers go into the sum at all.</p>
+
+<p>You need all three of these at once:</p>
+
+<ol>
+  <li><strong>One <code class="language-plaintext highlighter-rouge">amax</code> over everything:</strong> a dynamic per-tensor quantization scale is the
+clean case. A single number, computed from the whole buffer, that every output
+row gets multiplied by.</li>
+  <li><strong>Rows you never filled in:</strong> padding, usually. Bytes sitting in the same buffer as
+your real tokens, left over from whatever ran before them.</li>
+  <li><strong>A top-k underneath:</strong> an argmax, greedy sampling, anything that turns a
+float into a choice.</li>
+</ol>
+
+<p>Any two of these are harmless. All three and your model gives different answers at
+temperature zero, with no batch size involved anywhere. Batch-invariant kernels will
+not help, because every sum here already runs in the right order. The sum is just
+reading bytes that were never yours.</p>
+
+<p><img src="/assets/img/nd-chain.png" alt="The five stages from stale bytes to different output. Bucket padding leaves rows 313 to 319 holding whatever was there last time; amax runs over all 320 rows; the scale shifts so all 313 real rows requantize; the top-k router swaps experts ranked 8 and 9; the token is routed elsewhere and the output diverges. Three of the five stages are the three ingredients." />
+<em>A few stale bytes at one end, a different answer at the other. The router is what does the rescaling.</em></p>
+
+<hr />
+
+<h2 id="1-one-number-for-the-whole-tensor">1. One number for the whole tensor</h2>
+
+<p>Take dynamic per-tensor FP8 activation quantization, the standard setup for 4-bit
+weight / 8-bit activation GEMMs:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>s      = amax(X) / 448          # amax over the WHOLE tensor; 448 = FP8 E4M3 max
+X_q    = fp8(X / s)
+</code></pre></div></div>
+
+<p>The GEMM consumes <code class="language-plaintext highlighter-rouge">X_q</code>, and the epilogue multiplies the accumulator back by <code class="language-plaintext highlighter-rouge">s</code>.</p>
+
+<p>Now look at what <code class="language-plaintext highlighter-rouge">s</code> reads: all of <code class="language-plaintext highlighter-rouge">X</code>, every row of it. So what row 0 quantizes to
+depends on row 319, and on row 7, and on every other row in the batch. Move the
+maximum anywhere in the tensor and all 320 rows shift together.</p>
+
+<p>That is a deliberate trade and a cheap one: a single scalar, a single epilogue
+multiply, no extra memory traffic. Most W4A8 kernels offer it as the dynamic path,
+and it is what you get whenever the checkpoint ships no calibrated scales.</p>
+
+<p>The bill comes due when part of the buffer isn’t yours. Every byte in <code class="language-plaintext highlighter-rouge">X</code> reaches
+every output row, including the bytes in rows you never wrote. Fill all 320 rows with
+real tokens and you will never notice. The next section is where you stop filling all
+320.</p>
+
+<hr />
+
+<h2 id="2-seven-rows-nobody-zeroed">2. Seven rows nobody zeroed</h2>
+
+<p>A CUDA graph is captured once and replayed, which is how servers get their per-step
+CPU cost down. Capture records a fixed sequence of launches against fixed buffers at
+one fixed shape.</p>
+
+<p>“Fixed” is the operative word. Real requests arrive with arbitrary token counts, so
+the server captures a set of graphs at bucketed sizes: 256, 288, 320, and so on. When
+313 tokens show up, it runs them through the 320-token graph and pads.</p>
+
+<p>That leaves rows 313 through 319 holding whatever the last request left there. They
+live in a persistent buffer that gets reused across steps and across requests. Nobody
+zeroes them, because nobody needs to. The outputs of those rows are sliced off and
+thrown away, and everything downstream knows to skip them.</p>
+
+<p>Everything except <code class="language-plaintext highlighter-rouge">amax</code>.</p>
+
+<p>So: seven rows of stale bytes go into <code class="language-plaintext highlighter-rouge">amax</code>, <code class="language-plaintext highlighter-rouge">s</code> comes out different, and all 313
+real tokens quantize differently. The answer you asked for now depends on the request
+before yours.</p>
+
+<p>Padding is necessary but not sufficient. In our sweep the 128 bucket stayed
+deterministic at every token count from 121 through 128, padding and all. Whether the
+leftover bytes are large enough to move the maximum depends on what happens to be
+sitting there.</p>
+
+<p>The eager path does not pad. That is what makes this hard to find. Turn graph capture
+off and the bug goes away, so you spend the afternoon on graph capture and on the
+kernels that only run underneath it. The scale sits in both paths, behaving
+identically.</p>
+
+<hr />
+
+<h2 id="3-a-router-does-not-round-it-picks">3. A router does not round, it picks</h2>
+
+<p>The odd part was that the error barely moved. FP8 quantization of these activations
+sits at 2.2361e-02 relative error, and it stays there while the padding misbehaves. We
+pushed on it: hijack the <code class="language-plaintext highlighter-rouge">amax</code> with one row 64 times too large and the real rows come
+out at 2.2397e-02, which is 1.0x normal. Blow that row up 1024 times and it reaches
+3.0121e-02, 1.3x.</p>
+
+<p>So the size of the error is not the problem. The problem is that it lands somewhere
+different each run. Every value sits inside an FP8 bin, and moving the scale moves the
+bin edges, so a number that rounded down last time rounds up this time.</p>
+
+<p>An error that small should have disappeared into the noise, and instead whole
+paragraphs changed. So we went looking for something that could do that: a split-K
+reduction accumulating in a different order on each launch, or a race between blocks.
+That was the wrong place to look.</p>
+
+<p>It was the router. An MoE layer scores each token against every expert and keeps the
+best 8. With a few hundred experts, the scores around 8th and 9th place are packed
+tight. The more experts you score, the thinner the margin between the last one you
+keep and the first one you drop. We measured that margin on a stand-in rather than the real thing: a
+random matrix shaped like the production router, with Gaussian inputs.</p>
+
+<p><strong>24.3% of rows had their 8th and 9th score within one bf16 ulp of each other.</strong></p>
+
+<p><img src="/assets/img/nd-topk-amplifier.png" alt="Two panels. Left: one row's expert scores sorted descending, with a dashed cut line after rank 8 separating routed from dropped experts, and ranks 8 and 9 highlighted as nearly equal in height. Right: a 10 by 10 grid of squares where 24 are filled, showing that 24.3 percent of rows have their 8th and 9th score within one bf16 ulp of each other, measured on a synthetic router-shaped matrix with Gaussian inputs." />
+<em>A router does not round. It picks, and near the cut the margin is thinner than the arithmetic that produced it. Synthetic input, not the deployed router.</em></p>
+
+<p>Synthetic scores are not real ones, so read that as an order of magnitude rather than
+a measurement of the deployed router. It is enough to make the point. For a quarter of
+rows the last bit of the score decides which expert runs, and when it flips, that
+token gets a different expert in one of its eight slots. The next layer sees a
+different vector. Twenty layers on, different words.</p>
+
+<p>Anything that turns a float into a choice throws away how big the error was and keeps
+only which side of the line it landed on. Top-k routing is the loudest case, but
+greedy decoding is the same trick with a bigger table: <code class="language-plaintext highlighter-rouge">argmax</code> over the vocabulary,
+near-ties whenever the model isn’t sure. So you cannot read the size of the cause off
+the size of the damage. Different paragraphs can come from one bit.</p>
+
+<hr />
+
+<h2 id="which-of-the-two-do-you-have">Which of the two do you have</h2>
+
+<p>Batch variance and this one look identical from outside and need different fixes.
+Cheapest test first:</p>
+
+<ol>
+  <li><strong>Pin the batch.</strong> Send the same request with the same neighbours every time. If
+determinism comes back, it’s batch variance, and batch-invariant kernels are what
+you want. If it doesn’t, keep going.</li>
+  <li><strong>Turn graph capture off.</strong> Eager deterministic, graph not? Then it lives in the
+capture, and the fixed buffers are the first place to look.</li>
+  <li><strong>Zero the padding.</strong> This is the test that separates them, and it is one memset.
+If zeroing the pad rows makes the divergence stop, the padding is in one of your
+reductions. We ran the intervention on one shape: 1019 of 1019 positions differed
+before, 0 of 1019 after. The observational version is cheaper and we have more of
+it, because any request whose token count lands exactly on a bucket pads with
+nothing. All 40 of those cases came out deterministic, no counterexample.</li>
+  <li><strong>Read a value out of the middle of the graph.</strong> No Python runs during replay. The
+graph is a recorded list of kernel launches, so you cannot print, breakpoint, or
+hook. What you can do is record a copy into a persistent buffer at <em>capture</em> time.
+It becomes one of the recorded launches. So it fires on every replay, and you read
+the buffer from the host afterwards.</li>
+</ol>
+
+<h3 id="two-measurement-mistakes">Two measurement mistakes</h3>
+
+<p>Neither is specific to this bug.</p>
+
+<p>Our first comparison harness reported 22 of 40 cases as nondeterministic. All 22 came
+from the harness. The MoE kernel only writes the rows it actually routes, so every
+other row in the output buffer kept whatever was there before, and we were diffing
+stale memory. Zeroing both trials first took the re-run to 0 of 30.
+<strong>Zero the output on both trials before every comparison</strong>, or you are testing your
+allocator instead of your kernel.</p>
+
+<p>Then we measured a fresh deployment against a number taken before the deploy and
+reported an 8% prefill regression. It was noise between pods. A same-process A/B, both
+kernels loaded and alternating on identical inputs, showed the change was never
+slower. A cross-deployment comparison picks up every difference between the two
+deployments, and the one you care about is the smallest of them.</p>
+
+<hr />
+
+<h2 id="give-every-row-its-own-scale">Give every row its own scale</h2>
+
+<p>The fix that goes after the cause rather than the trigger is to stop sharing:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>s[i]   = amax(X[i, :]) / 448    # one reduction per row
+X_q[i] = fp8(X[i, :] / s[i])
+</code></pre></div></div>
+
+<p>One scale per token. Row 0 now depends on row 0 and nothing else. The seven pad rows
+still hold garbage, and they still get their own scales. Both leave together when
+those rows are sliced off. <strong>There is no longer a path from row 313 to row 0.</strong></p>
+
+<p>Three practical notes on doing it.</p>
+
+<p>The epilogue now takes a vector where it used to take a scalar. In CUTLASS that is a
+row or column broadcast in the fusion callback instead of a scalar multiply. Which one
+you want depends on the layout. Ours computes the transpose, <code class="language-plaintext highlighter-rouge">D^T = B^T · A^T</code>, because
+the mainloop takes the weight operand first. That puts the token axis on the kernel’s
+N dimension, so a row broadcast is what you need. Check yours rather than assuming. Getting it
+backwards compiles fine and produces garbage, so check against a reference first.</p>
+
+<p>Keep one kernel rather than two. You probably still need the static per-tensor path
+for checkpoints that ship calibrated scales. Instead of compiling a second kernel,
+give the broadcast a runtime stride. <code class="language-plaintext highlighter-rouge">Stride&lt;_0, bool, _0&gt;</code> in CUTLASS: stride 0
+re-reads the same scalar for every row, stride 1 walks the vector. One compiled
+kernel, both behaviours, picked by a flag at launch.</p>
+
+<p>It also came out faster, which we did not expect. One <code class="language-plaintext highlighter-rouge">amax</code> over the whole tensor has
+to combine across blocks, so it costs either two passes or an atomic. One <code class="language-plaintext highlighter-rouge">amax</code> per
+row is one block per row, one pass, nothing to combine. We fused it into the
+quantize-and-scatter kernel, which was already reading those rows. Timed in the same
+process with CUDA events, 12 runs a point: 20% less MoE time at 256 rows, 45% less at
+512, and +1.2% at 4096. Never slower at any size we tried. Accuracy did not move
+either. Relative error came out at 2.2361e-02 both ways, because these rows leave a
+normalization with their row maxima already equal: max over min across rows was
+exactly 1.0.</p>
+
+<p>The nine shapes that had been diverging came back bitwise identical with graph capture
+on. Max absolute difference exactly <code class="language-plaintext highlighter-rouge">0.000e+00</code>, all nine. The four that had always
+been deterministic stayed that way.</p>
+
+<h3 id="if-you-cant-touch-the-kernel">If you can’t touch the kernel</h3>
+
+<p>Sometimes it isn’t yours to change. Then:</p>
+
+<ul>
+  <li><strong>Mask the padding out of the <code class="language-plaintext highlighter-rouge">amax</code>:</strong> take the max over the valid token range
+only. This gets the padding out. But row 0 still shares a scale with row 312, so
+batch composition still moves your results.</li>
+  <li><strong>Zero the pad rows on every replay:</strong> cheap, and sensible as a second layer
+regardless. It fixes the trigger and leaves the cause, so the next buffer that gets
+padded brings the bug back.</li>
+  <li><strong>Ship calibrated scales:</strong> sidesteps all of it, at the cost of clipping anything
+the calibration set never saw.</li>
+</ul>
+
+<hr />
+
+<h2 id="every-statistic-over-a-buffer-includes-the-padding">Every statistic over a buffer includes the padding</h2>
+
+<p>The quantization scale is just where we happened to hit it. The same thing turns up
+wherever one number gets computed across an axis that can carry padding.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>The statistic</th>
+      <th>The axis it runs over</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">mean</code> and <code class="language-plaintext highlighter-rouge">var</code> in a normalization</td>
+      <td>the sequence dimension</td>
+    </tr>
+    <tr>
+      <td>the softmax denominator in attention</td>
+      <td>the key positions</td>
+    </tr>
+    <tr>
+      <td>a per-block KV dequantization scale</td>
+      <td>a page that is only half full</td>
+    </tr>
+    <tr>
+      <td>the activation range during calibration</td>
+      <td>whichever batch you calibrated on</td>
+    </tr>
+    <tr>
+      <td>the loss scale in training</td>
+      <td>the padded positions in a batch</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>We did not find bugs in any of these. They are where to look, and the check is the one
+from earlier: force the unused region to a known value and see whether the answer stops
+moving.</p>
+
+<p>Then look at what sits below. If it’s a top-k or an argmax, you don’t have a rounding
+difference. You have a different answer.</p>
+
+<hr />
+
+<h2 id="the-short-version">The short version</h2>
+
+<ul>
+  <li>Batch-invariant kernels fix what order a sum runs in. They don’t fix a sum that is
+reading rows you never wrote.</li>
+  <li>A per-tensor scale ties row 0 to row 319. Pad rows count as rows.</li>
+  <li>CUDA graph bucket padding is how those rows get there, and it never shows up in
+eager mode.</li>
+  <li>A top-k router is the amplifier. On a synthetic stand-in, a quarter of rows sat
+within one ulp of the cut, so the last bit of the score picked the expert.</li>
+  <li>Per-row scales cut the tie and ran faster than the global <code class="language-plaintext highlighter-rouge">amax</code> they replaced: 45%
+less MoE time at 512 rows, never slower anywhere.</li>
+  <li>When you test: zero the output buffers before comparing, and benchmark both versions
+in the same process.</li>
+</ul>
+
+    </div>
+    
+    <footer class="post-footer">
+      <a class="tag" href="#">#llm</a><a class="tag" href="#">#inference</a><a class="tag" href="#">#nondeterminism</a><a class="tag" href="#">#determinism</a><a class="tag" href="#">#quantization</a><a class="tag" href="#">#fp8</a><a class="tag" href="#">#int4</a><a class="tag" href="#">#moe</a><a class="tag" href="#">#cuda-graph</a><a class="tag" href="#">#numerics</a><a class="tag" href="#">#reproducibility</a>
+    </footer>
+    
+  </div>
+</article>
+</main>
+  <footer class="site-foot">
+    <div class="foot-wrap">© Lucas Nam — all opinions my own.</div>
+  </footer>
+  <script src="/assets/js/toc.js"></script>
+</body>
+</html>

@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" width="900" height="320" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="c" markerWidth="7" markerHeight="7" refX="6.5" refY="3.5" orient="auto">
+      <polygon points="0,0 7,3.5 0,7" fill="#6b7280"/>
+    </marker>
+  </defs>
+  <rect width="900" height="320" fill="#ffffff"/>
+
+  <text x="450" y="32" text-anchor="middle" font-size="19" font-weight="600" fill="#111827">From a stale byte to a different sentence</text>
+  <text x="450" y="54" text-anchor="middle" font-size="13" fill="#6b7280">Three of these five stages are the ingredients. Break any one and the chain stops.</text>
+
+  <!-- ingredient tags -->
+  <rect x="20" y="72" width="150" height="18" rx="9" fill="#fef2f2" stroke="#fca5a5" stroke-width="1"/>
+  <text x="95" y="85" text-anchor="middle" font-size="10" font-weight="600" fill="#b91c1c">UNCONTROLLED INPUT</text>
+  <rect x="198" y="72" width="150" height="18" rx="9" fill="#fef2f2" stroke="#fca5a5" stroke-width="1"/>
+  <text x="273" y="85" text-anchor="middle" font-size="10" font-weight="600" fill="#b91c1c">SHARED REDUCTION</text>
+  <rect x="554" y="72" width="150" height="18" rx="9" fill="#fef2f2" stroke="#fca5a5" stroke-width="1"/>
+  <text x="629" y="85" text-anchor="middle" font-size="10" font-weight="600" fill="#b91c1c">DISCRETE DECISION</text>
+
+  <!-- boxes -->
+  <rect x="20" y="98" width="150" height="96" rx="6" fill="#ffffff" stroke="#b91c1c" stroke-width="1.6"/>
+  <text x="95" y="120" text-anchor="middle" font-size="12" font-weight="600" fill="#111827">Bucket padding</text>
+  <text x="95" y="140" text-anchor="middle" font-size="10.5" fill="#374151">313 tokens run in the</text>
+  <text x="95" y="155" text-anchor="middle" font-size="10.5" fill="#374151">320-token graph. Rows</text>
+  <text x="95" y="170" text-anchor="middle" font-size="10.5" fill="#374151">313-319 keep whatever</text>
+  <text x="95" y="185" text-anchor="middle" font-size="10.5" fill="#374151">was there last time.</text>
+
+  <rect x="198" y="98" width="150" height="96" rx="6" fill="#ffffff" stroke="#b91c1c" stroke-width="1.6"/>
+  <text x="273" y="120" text-anchor="middle" font-size="12" font-weight="600" fill="#111827">amax(X)</text>
+  <text x="273" y="140" text-anchor="middle" font-size="10.5" fill="#374151">The maximum runs over</text>
+  <text x="273" y="155" text-anchor="middle" font-size="10.5" fill="#374151">all 320 rows, because</text>
+  <text x="273" y="170" text-anchor="middle" font-size="10.5" fill="#374151">nobody told it which</text>
+  <text x="273" y="185" text-anchor="middle" font-size="10.5" fill="#374151">ones are real.</text>
+
+  <rect x="376" y="98" width="150" height="96" rx="6" fill="#ffffff" stroke="#d1d5db" stroke-width="1.6"/>
+  <text x="451" y="120" text-anchor="middle" font-size="12" font-weight="600" fill="#111827">s shifts</text>
+  <text x="451" y="140" text-anchor="middle" font-size="10.5" fill="#374151">One scale, so all 313</text>
+  <text x="451" y="155" text-anchor="middle" font-size="10.5" fill="#374151">real rows requantize</text>
+  <text x="451" y="170" text-anchor="middle" font-size="10.5" fill="#374151">to slightly different</text>
+  <text x="451" y="185" text-anchor="middle" font-size="10.5" fill="#374151">integers.</text>
+
+  <rect x="554" y="98" width="150" height="96" rx="6" fill="#ffffff" stroke="#b91c1c" stroke-width="1.6"/>
+  <text x="629" y="120" text-anchor="middle" font-size="12" font-weight="600" fill="#111827">top-k flips</text>
+  <text x="629" y="140" text-anchor="middle" font-size="10.5" fill="#374151">Experts ranked 8 and 9</text>
+  <text x="629" y="155" text-anchor="middle" font-size="10.5" fill="#374151">swap places. The token</text>
+  <text x="629" y="170" text-anchor="middle" font-size="10.5" fill="#374151">is routed somewhere</text>
+  <text x="629" y="185" text-anchor="middle" font-size="10.5" fill="#374151">else entirely.</text>
+
+  <rect x="732" y="98" width="150" height="96" rx="6" fill="#fef2f2" stroke="#dc2626" stroke-width="1.6"/>
+  <text x="807" y="120" text-anchor="middle" font-size="12" font-weight="600" fill="#b91c1c">Different text</text>
+  <text x="807" y="140" text-anchor="middle" font-size="10.5" fill="#374151">A whole expert's worth</text>
+  <text x="807" y="155" text-anchor="middle" font-size="10.5" fill="#374151">of output changed, and</text>
+  <text x="807" y="170" text-anchor="middle" font-size="10.5" fill="#374151">twenty layers are left</text>
+  <text x="807" y="185" text-anchor="middle" font-size="10.5" fill="#374151">to amplify it.</text>
+
+  <line x1="170" y1="146" x2="196" y2="146" stroke="#6b7280" stroke-width="1.5" marker-end="url(#c)"/>
+  <line x1="348" y1="146" x2="374" y2="146" stroke="#6b7280" stroke-width="1.5" marker-end="url(#c)"/>
+  <line x1="526" y1="146" x2="552" y2="146" stroke="#6b7280" stroke-width="1.5" marker-end="url(#c)"/>
+  <line x1="704" y1="146" x2="730" y2="146" stroke="#6b7280" stroke-width="1.5" marker-end="url(#c)"/>
+
+  <!-- magnitude rail -->
+  <line x1="20" y1="220" x2="882" y2="220" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="95" y="238" text-anchor="middle" font-size="10.5" fill="#9ca3af">a few stale bytes</text>
+  <text x="451" y="238" text-anchor="middle" font-size="10.5" fill="#9ca3af">one ulp</text>
+  <text x="807" y="238" text-anchor="middle" font-size="10.5" font-weight="600" fill="#b91c1c">a different answer</text>
+  <text x="450" y="262" text-anchor="middle" font-size="11" fill="#6b7280">The size of the difference tells you nothing about the size of the cause. The router is what rescales it.</text>
+
+  <text x="450" y="296" text-anchor="middle" font-size="11.5" fill="#374151">Batch-invariant kernels fix the order a reduction sums in. Every stage above is already order-independent.</text>
+</svg>
